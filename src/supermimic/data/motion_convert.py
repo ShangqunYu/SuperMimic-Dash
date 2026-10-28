@@ -32,49 +32,20 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
-G1_JOINT_NAMES: tuple[str, ...] = (
-    "left_hip_pitch_joint",
-    "left_hip_roll_joint",
-    "left_hip_yaw_joint",
-    "left_knee_joint",
-    "left_ankle_pitch_joint",
-    "left_ankle_roll_joint",
-    "right_hip_pitch_joint",
-    "right_hip_roll_joint",
-    "right_hip_yaw_joint",
-    "right_knee_joint",
-    "right_ankle_pitch_joint",
-    "right_ankle_roll_joint",
-    "waist_yaw_joint",
-    "waist_roll_joint",
-    "waist_pitch_joint",
-    "left_shoulder_pitch_joint",
-    "left_shoulder_roll_joint",
-    "left_shoulder_yaw_joint",
-    "left_elbow_joint",
-    "left_wrist_roll_joint",
-    "left_wrist_pitch_joint",
-    "left_wrist_yaw_joint",
-    "right_shoulder_pitch_joint",
-    "right_shoulder_roll_joint",
-    "right_shoulder_yaw_joint",
-    "right_elbow_joint",
-    "right_wrist_roll_joint",
-    "right_wrist_pitch_joint",
-    "right_wrist_yaw_joint",
-)
+from supermimic.robots import G1, G1_JOINT_NAMES
+
 NUM_JOINTS = len(G1_JOINT_NAMES)
 
 
 def g1_xml_path() -> Path:
-    import mjlab
-
-    return Path(mjlab.__file__).parent / "asset_zoo/robots/unitree_g1/xmls/g1.xml"
+    return G1.xml_path()
 
 
 def load_g1_model(xml_path: str | Path | None = None) -> mujoco.MjModel:
     """Standalone CPU MjModel of the G1. Asserts the joint order matches the CSV order."""
-    model = mujoco.MjModel.from_xml_path(str(xml_path or g1_xml_path()))
+    if xml_path is None:
+        return G1.load_model()
+    model = mujoco.MjModel.from_xml_path(str(xml_path))
     names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(model.njnt)]
     assert model.jnt_type[0] == mujoco.mjtJoint.mjJNT_FREE, "first joint must be the free joint"
     assert tuple(names[1:]) == G1_JOINT_NAMES, f"joint order mismatch: {names[1:]}"

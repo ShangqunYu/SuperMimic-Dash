@@ -7,7 +7,7 @@ reference bodies to the robot anchor in xy + yaw only
 (``MotionCommand.update_relative_body_poses``).
 
 Inputs are world-frame link quantities of the *tracked* bodies (same ordering as
-``TRACKED_BODIES``), the anchor being one of them (``anchor_index``).
+``RobotSpec.tracked_bodies``), the anchor being one of them (``anchor_index``).
 Rewards are returned already weighted and multiplied by ``dt`` like mjlab's reward
 manager (``scale_rewards_by_dt=True``).
 """
@@ -86,7 +86,7 @@ def tracking_reward_terms(
     action: torch.Tensor,
     prev_action: torch.Tensor,
     joint_pos: torch.Tensor,
-    soft_limits: torch.Tensor,  # (29, 2) or (N, 29, 2)
+    soft_limits: torch.Tensor,  # (NJ, 2) or (N, NJ, 2)
     cfg: TrackingRewardCfg,
 ) -> dict[str, torch.Tensor]:
     """Per-term weighted, dt-scaled rewards (N,) plus 'total'."""

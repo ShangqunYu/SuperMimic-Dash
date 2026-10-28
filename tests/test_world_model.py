@@ -20,7 +20,7 @@ def test_state_spec_identity_and_errors():
     from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
 
     dev = "cpu"
-    spec = StateSpec(StateSpecCfg(explicit_integration=False), dev, torch.float64)
+    spec = StateSpec(StateSpecCfg(explicit_integration=False), dev, 29, torch.float64)
     s = _random_states(64, dev, torch.float64)
     s2 = spec.integrate(s, torch.zeros(64, 70, dtype=torch.float64))
     np.testing.assert_allclose(s2.numpy(), s.numpy(), atol=1e-12)
@@ -36,7 +36,7 @@ def test_state_spec_identity_and_errors():
     s_rot[:, 36:39] = quat_apply(qy, s[:, 36:39])
     np.testing.assert_allclose(spec.canonical(s_rot).numpy(), spec.canonical(s).numpy(), atol=1e-9)
     # Explicit integration with zero delta = constant-velocity extrapolation.
-    spec2 = StateSpec(StateSpecCfg(explicit_integration=True), dev, torch.float64)
+    spec2 = StateSpec(StateSpecCfg(explicit_integration=True), dev, 29, torch.float64)
     s3 = spec2.integrate(s, torch.zeros(64, 70, dtype=torch.float64))
     np.testing.assert_allclose(s3[:, 0:3].numpy(), (s[:, 0:3] + 0.02 * s[:, 36:39]).numpy(), atol=1e-12)
     np.testing.assert_allclose(s3[:, 7:36].numpy(), (s[:, 7:36] + 0.02 * s[:, 42:71]).numpy(), atol=1e-12)
@@ -48,8 +48,8 @@ def test_world_model_overfits_replay_windows():
     from supermimic.data.motion_convert import load_g1_model
     from supermimic.envs import SuperMimicEnvCfgArgs, make_env
     from supermimic.envs.mdp.motion_library import discover_npz
-    from supermimic.envs.tracking_env_cfg import ANCHOR_BODY, ROOT_BODY, TRACKED_BODIES
-    from supermimic.kinematics.g1_fk import G1Kinematics
+    from supermimic.robots import G1
+    from supermimic.kinematics.fk import Kinematics
     from supermimic.world_model.heads import AnalyticHeads
     from supermimic.world_model.wm_trainer import WMTrainerCfg, WorldModelTrainer
     from supermimic.world_model.world_model import WorldModel, WorldModelCfg
@@ -62,8 +62,8 @@ def test_world_model_overfits_replay_windows():
             env.step(0.3 * torch.randn(256, 29, device=env.device))
         rec = env.recorder_manager.get_term("replay")
         robot = env.scene["robot"]
-        fk = G1Kinematics(load_g1_model(), device=env.device)
-        heads = AnalyticHeads(fk, TRACKED_BODIES, ANCHOR_BODY, ROOT_BODY, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
+        fk = Kinematics(load_g1_model(), device=env.device)
+        heads = AnalyticHeads(fk, G1.tracked_bodies, G1.anchor_body, G1.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         wm = WorldModel(WorldModelCfg(hidden=(512, 512, 512)), heads, env.device)
         lib = env.command_manager.get_term("motion").library
         tr = WorldModelTrainer(wm, lib, WMTrainerCfg(batch_size=512, batches_per_update=1, lr=1e-3))

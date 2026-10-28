@@ -5,9 +5,9 @@ README.md). **The goal now is to port it to Dash**, our own 18-DOF humanoid,
 and train a SuperMimic-style tracking foundation model on our BONES-SEED
 retargets. Training will run on a machine with an RTX 6000 Pro (96 GB).
 
-Nothing in `src/` has been changed for Dash yet. The only Dash addition so far
-is `scripts/dash_data/`, which holds the data-pipeline scripts that produced
-the dataset described below.
+The port is in progress on branch `dash-port` (uncommitted as of 2026-10-27:
+git is not set up on the lab server). See "Port status" below. The data-pipeline
+scripts that produced the dataset are in `scripts/dash_data/`.
 
 Always use `uv run`. Prefix with `env -u PYTHONPATH` if the shell has ROS or
 other Python packages on its path.
@@ -109,7 +109,41 @@ folder.
   with FK. So our npz should feed `build_library.py` directly once FK and the
   robot spec are Dash.
 
-## Port plan (agreed, not started)
+## Port status (2026-10-27, lab server)
+
+Lab server: 2× RTX PRO 6000 Max-Q, SSD at `/media/shangqunyu/Crucial X10`, `uv` at
+`~/.local/bin/uv` (not on PATH). Local data (gitignored): `data/npz/dash_bones_seed/`
+(64,103 clips, load-checked), `data/library/dash_bones_seed_compact.pt` (23.26M frames,
+129.25 h, 2.28 GB fp16), LAFAN1 G1 data in `data/raw/lafan1`, `data/npz/lafan1` so the
+G1 regression tests run.
+
+- **Done, steps 1-4.**
+  - `src/supermimic/robots.py`: `RobotSpec` registry (`g1`, `dash`). Every size follows
+    from NJ: state 13+2NJ, xi 4+NJ, obs 3NJ+6, goal frame 2NJ+10 (Dash 49/22/60/46).
+    Select with `--robot dash` (`TrainConfig.robot`); checkpoints and packed
+    libraries record the robot and refuse a mismatch.
+  - `src/supermimic/assets/dash/`: vendored XML, meshes and constants from
+    mjlab_dash 0d56f20. Forearm-thigh hulls always on. Actuator command delay
+    (0-25 ms) only with `--env.hardware-dr`: a delay longer than one control step makes
+    s' depend on the previous action, which the world model does not see.
+  - Hardware DR (`--env.hardware-dr`, off by default): mass, PD gains, armature, joint
+    friction, wider COM, command delay. Only the COM enters xi. COM x is mjlab_dash's
+    walking range (-0.06, 0.06); its tracking task pins -0.06 (d819b37). Open question.
+  - Tests cover Dash FK vs MuJoCo, npz vs FK, and the analytic reward/obs/termination vs
+    the simulator (parametrized g1/dash).
+- **Observations.** Open-loop PD on the reference joints falls within ~0.5 s (kp=80
+  sag). The reference sits outside the 0.9 soft joint limits on 39% of frames; the
+  joint_limit penalty averages 3% of the max tracking reward per step (G1: 0.5%).
+- **Not ported:** `scripts/media/render_rollout.py` (G1 XML), `eval_push.py` (G1 clip).
+- **Multi-GPU on the lab server.** NCCL's default P2P path hangs on the first
+  collective (PCIe, no NVLink). `NCCL_P2P_DISABLE=1` works (66 MB all-reduce 2.1 ms).
+  `torchrun --standalone` also resolves the host to its Tailscale name and cannot
+  connect; pass `--master-addr 127.0.0.1`. Decision: train on one GPU.
+- **Run `dash_e1_sim`** (started 2026-10-27 ~20:15, GPU 0): sim-only (paper xi DR, no
+  hardware DR), all 64,103 clips, 4096 envs, 100k iterations (cosine decay over 78k),
+  ~3.6 it/s ≈ 8 h. Log `logs/dash_e1_sim.out`, checkpoints `logs/dash_e1_sim/`.
+
+## Original port plan
 
 Work on a branch. Keep G1 working, and run `uv run pytest tests -q` after
 each step.

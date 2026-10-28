@@ -50,6 +50,7 @@ def main(
     policy, cfg = load_policy_from_checkpoint(ckpt, device)
     args = SuperMimicEnvCfgArgs(
         npz_files=files,
+        robot=cfg.get("robot", "g1"),
         num_envs=num_envs,
         future_frames=cfg["env"]["future_frames"],
         episode_length_s=1.0e5,

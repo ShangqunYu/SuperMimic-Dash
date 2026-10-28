@@ -60,6 +60,7 @@ def main(ckpt: Path, speeds: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0), num_envs:
     from supermimic.eval.benchmark import load_policy_from_checkpoint
 
     policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    assert cfg.get("robot", "g1") == "g1", "the synthetic push clip below is built for the G1"
     tmp = Path(tempfile.mkdtemp()) / "tpose.npz"
     make_tpose_clip(tmp)
     args = SuperMimicEnvCfgArgs(npz_files=[str(tmp)], num_envs=num_envs, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False, sampling_mode="start", record_transitions=False, episode_length_s=1e5, future_frames=cfg["env"]["future_frames"], anchor_obs=cfg["env"].get("anchor_obs", False), seed=0)

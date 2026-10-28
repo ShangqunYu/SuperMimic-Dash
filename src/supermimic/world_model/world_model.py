@@ -41,8 +41,9 @@ class WorldModel(nn.Module):
     def __init__(self, cfg: WorldModelCfg, heads: AnalyticHeads, device):
         super().__init__()
         self.cfg = cfg
-        self.spec = StateSpec(cfg.state_spec, device)
-        self.dynamics = DynamicsMLP(hidden=cfg.hidden)
+        self.num_joints = heads.num_joints
+        self.spec = spec = StateSpec(cfg.state_spec, device, self.num_joints)
+        self.dynamics = DynamicsMLP(spec.feat_dim, self.num_joints, spec.xi_dim, spec.delta_dim, hidden=cfg.hidden)
         self.term_head = TerminationHead(cfg.term_hidden, cfg.height_threshold, cfg.tilt_threshold)
         self.heads = heads  # analytic observation / reward / FK (no parameters)
         self.to(device)
@@ -63,7 +64,7 @@ class WorldModel(nn.Module):
     # ------------------------------------------------------------------ Eq. 1
 
     def _loss_step(self, s, a, xi, s_true, done, ref_root_pos, ref_root_quat):
-        """One autoregressive step of Eq. 1: returns (s_next, sq_err (n,70), term_bce (n,), logits (n,))."""
+        """One autoregressive step of Eq. 1: returns (s_next, sq_err (n,12+2NJ), term_bce (n,), logits (n,))."""
         s_next = self.step(s, a, xi)
         e = self.spec.error_vector(s_next, s_true)
         feats = self.heads.termination_features(s_next[..., 0:3], s_next[..., 3:7], ReferenceFrame(None, None, None, None, ref_root_pos, ref_root_quat))
@@ -77,7 +78,7 @@ class WorldModel(nn.Module):
     def window_loss(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor, done: torch.Tensor, refs: list[ReferenceFrame]):
         """k-step autoregressive loss.
 
-        states: (k+1, n, 71) logged states; a_exec: (k, n, 29); xi: (n, 33);
+        states: (k+1, n, 13+2NJ) logged states; a_exec: (k, n, NJ); xi: (n, 4+NJ);
         done: (k, n) termination label of states 1..k; refs[j]: reference of transition j (for the
         termination features of state j+1).
         """

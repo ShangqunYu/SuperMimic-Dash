@@ -9,15 +9,15 @@ import torch
 import tyro
 
 
-def main(num_envs: int = 4096, steps: int = 300, warmup: int = 50, record: bool = True, clips: int = 3) -> None:
+def main(num_envs: int = 4096, steps: int = 300, warmup: int = 50, record: bool = True, clips: int = 3, robot: str = "g1", npz_dir: Path = Path("data/npz/lafan1")) -> None:
     from supermimic.envs import SuperMimicEnvCfgArgs, make_env
     from supermimic.envs.mdp.motion_library import discover_npz
 
-    files = discover_npz(Path("data/npz/lafan1"), limit=clips)
-    args = SuperMimicEnvCfgArgs(npz_files=[str(f) for f in files], num_envs=num_envs, record_transitions=record)
+    files = discover_npz(npz_dir, limit=clips)
+    args = SuperMimicEnvCfgArgs(npz_files=[str(f) for f in files], robot=robot, num_envs=num_envs, record_transitions=record)
     env = make_env(args)
     env.reset()
-    act = torch.zeros(num_envs, 29, device=env.device)
+    act = torch.zeros(num_envs, env.action_manager.total_action_dim, device=env.device)
     for _ in range(warmup):
         env.step(act)
     torch.cuda.synchronize()

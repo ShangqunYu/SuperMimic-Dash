@@ -29,9 +29,9 @@ class MLP(nn.Module):
 
 
 class DynamicsMLP(nn.Module):
-    """delta = f(canonical(s), a, xi_norm) -> (…, 70). Zero-initialised last layer (identity dynamics at init)."""
+    """delta = f(canonical(s), a, xi_norm) -> (…, 12 + 2 NJ). Zero-initialised last layer (identity dynamics at init)."""
 
-    def __init__(self, feat_dim: int = 71, act_dim: int = 29, xi_dim: int = 33, hidden=(2048, 2048, 2048), out_dim: int = 70):
+    def __init__(self, feat_dim: int, act_dim: int, xi_dim: int, out_dim: int, hidden=(2048, 2048, 2048)):
         super().__init__()
         self.mlp = MLP(feat_dim + act_dim + xi_dim, tuple(hidden), out_dim, zero_last=True)
 

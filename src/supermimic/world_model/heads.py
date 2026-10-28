@@ -1,7 +1,7 @@
 """Analytic heads of the world model (plan D4): observation, reward, termination.
 
-Everything here is a pure differentiable function of the 71-d simulator state
-``s = [qpos(36) | qvel(35)]`` (root position expressed relative to the env origin,
+Everything here is a pure differentiable function of the (13 + 2 NJ)-d simulator state
+``s = [qpos(7+NJ) | qvel(6+NJ)]`` (root position expressed relative to the env origin,
 see ``StateIO``), the previous clean action, the sim context ``xi`` and the
 reference frame, so the same code serves the simulator-side tests and the
 imagined rollouts.
@@ -14,28 +14,31 @@ from dataclasses import dataclass
 import torch
 
 from supermimic.envs.mdp.rewards import TrackingRewardCfg, tracking_reward_terms
-from supermimic.kinematics.g1_fk import G1Kinematics
+from supermimic.kinematics.fk import Kinematics
 from supermimic.kinematics.rotations import projected_gravity, quat_apply_inverse
+from supermimic.robots import nj_from_obs_dim, nj_from_state_dim
 
-OBS_DIM = 93
-# Term layout of the ``policy`` observation group (order matters: term-major history).
-OBS_TERMS = (("joint_pos", 29), ("joint_vel", 29), ("base_ang_vel", 3), ("projected_gravity", 3), ("actions", 29))
+
+def obs_terms(nj: int) -> tuple[tuple[str, int], ...]:
+    """Term layout of the ``policy`` observation group (order matters: term-major history)."""
+    return (("joint_pos", nj), ("joint_vel", nj), ("base_ang_vel", 3), ("projected_gravity", 3), ("actions", nj))
 
 
 def split_state(s: torch.Tensor):
-    """-> root_pos (…,3), root_quat (…,4), joint_pos (…,29), root_lin_vel_w (…,3), root_ang_vel_b (…,3), joint_vel (…,29)."""
-    return s[..., 0:3], s[..., 3:7], s[..., 7:36], s[..., 36:39], s[..., 39:42], s[..., 42:71]
+    """-> root_pos (…,3), root_quat (…,4), joint_pos (…,NJ), root_lin_vel_w (…,3), root_ang_vel_b (…,3), joint_vel (…,NJ)."""
+    nj = nj_from_state_dim(s.shape[-1])
+    return s[..., 0:3], s[..., 3:7], s[..., 7 : 7 + nj], s[..., 7 + nj : 10 + nj], s[..., 10 + nj : 13 + nj], s[..., 13 + nj :]
 
 
 def analytic_observation(
     s: torch.Tensor, prev_action: torch.Tensor, xi: torch.Tensor, default_joint_pos: torch.Tensor
 ) -> torch.Tensor:
-    """Noise-free 93-d proprioceptive observation (paper Table A.1) from state + context.
+    """Noise-free (3 NJ + 6)-d proprioceptive observation (paper Table A.1) from state + context.
 
-    xi[..., 1:30] is the encoder bias: observed joint positions are ``q + bias - q0``.
+    xi[..., 1:1+NJ] is the encoder bias: observed joint positions are ``q + bias - q0``.
     """
     _, root_quat, q, _, ang_b, qd = split_state(s)
-    bias = xi[..., 1:30]
+    bias = xi[..., 1 : 1 + q.shape[-1]]
     return torch.cat([q + bias - default_joint_pos, qd, ang_b, projected_gravity(root_quat), prev_action], dim=-1)
 
 
@@ -55,11 +58,11 @@ ANCHOR_OBS_DIM = 9
 
 
 def flatten_history_term_major(hist: torch.Tensor) -> torch.Tensor:
-    """(H, N, 93) oldest→newest  ->  (N, 930) in mjlab's term-major layout [A_t0..A_tH-1, B_t0..]."""
-    H, N, _ = hist.shape
+    """(H, N, 3NJ+6) oldest→newest  ->  (N, H(3NJ+6)) in mjlab's term-major layout [A_t0..A_tH-1, B_t0..]."""
+    H, N, D = hist.shape
     chunks = []
     start = 0
-    for _, d in OBS_TERMS:
+    for _, d in obs_terms(nj_from_obs_dim(D)):
         chunks.append(hist[:, :, start : start + d].permute(1, 0, 2).reshape(N, H * d))
         start += d
     return torch.cat(chunks, dim=-1)
@@ -82,7 +85,7 @@ class AnalyticHeads:
 
     def __init__(
         self,
-        fk: G1Kinematics,
+        fk: Kinematics,
         tracked_body_names: tuple[str, ...],
         anchor_body_name: str,
         root_body_name: str,
@@ -91,6 +94,7 @@ class AnalyticHeads:
         reward_cfg: TrackingRewardCfg | None = None,
     ):
         self.fk = fk
+        self.num_joints = fk.nq - 7
         self.tracked_idx = fk.body_indices(tracked_body_names)
         self.anchor_index = tracked_body_names.index(anchor_body_name)
         self.root_fk_index = fk.body_index(root_body_name)
@@ -99,7 +103,7 @@ class AnalyticHeads:
         self.reward_cfg = reward_cfg or TrackingRewardCfg()
 
     def robot_bodies(self, s: torch.Tensor) -> dict[str, torch.Tensor]:
-        out = self.fk(s[..., :36], s[..., 36:])
+        out = self.fk(s[..., : self.fk.nq], s[..., self.fk.nq :])
         idx = self.tracked_idx
         return {
             "pos": out["pos"][..., idx, :],
@@ -125,7 +129,7 @@ class AnalyticHeads:
             anchor_index=self.anchor_index,
             action=action,
             prev_action=prev_action,
-            joint_pos=s_next[..., 7:36],
+            joint_pos=s_next[..., 7 : 7 + self.num_joints],
             soft_limits=self.soft_limits,
             cfg=self.reward_cfg,
         )
@@ -139,7 +143,7 @@ class AnalyticHeads:
         return torch.stack([height, tilt], dim=-1)
 
     def terminated(self, s: torch.Tensor, ref: ReferenceFrame, height_thr: float = 0.25, tilt_thr: float = 0.8) -> torch.Tensor:
-        f = self.termination_features(s[..., 0:3], s[..., 3:7], ref)  # pelvis == free-joint root
+        f = self.termination_features(s[..., 0:3], s[..., 3:7], ref)  # root body == free-joint root
         return (f[..., 0].abs() > height_thr) | (f[..., 1].abs() > tilt_thr)
 
     @staticmethod

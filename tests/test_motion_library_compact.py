@@ -14,13 +14,13 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or not NPZ.exists(
 def test_compact_matches_full():
     torch.backends.cuda.matmul.allow_tf32 = False
     from supermimic.envs.mdp.motion_library import MotionLibrary, discover_npz
-    from supermimic.envs.tracking_env_cfg import TRACKED_BODIES
+    from supermimic.robots import G1
 
     files = discover_npz(NPZ, names=["walk1_subject1", "jumps1_subject1"])
     q0 = torch.zeros(29)
-    full = MotionLibrary(files, TRACKED_BODIES, q0, device="cuda", compact=False)
-    comp32 = MotionLibrary(files, TRACKED_BODIES, q0, device="cuda", compact=True, store_dtype=torch.float32)
-    comp16 = MotionLibrary(files, TRACKED_BODIES, q0, device="cuda", compact=True, store_dtype=torch.float16)
+    full = MotionLibrary(files, G1.tracked_bodies, q0, robot=G1, device="cuda", compact=False)
+    comp32 = MotionLibrary(files, G1.tracked_bodies, q0, robot=G1, device="cuda", compact=True, store_dtype=torch.float32)
+    comp16 = MotionLibrary(files, G1.tracked_bodies, q0, robot=G1, device="cuda", compact=True, store_dtype=torch.float16)
     f = torch.randint(0, full.num_frames, (512,), device="cuda")
     bf, b32, b16 = full.bodies(f), comp32.bodies(f), comp16.bodies(f)
     np.testing.assert_allclose(b32.pos_w.cpu().numpy(), bf.pos_w.cpu().numpy(), atol=2e-5)

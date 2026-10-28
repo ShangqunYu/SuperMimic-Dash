@@ -28,6 +28,7 @@ class EnvCfg:
     obs_noise: bool = True
     reset_noise: bool = True
     domain_randomization: bool = True
+    hardware_dr: bool = False  # robot's hardware DR + command delay (Dash only)
     sampling_mode: str = "return"
     replay_capacity: int = 1000
     future_frames: int = 10
@@ -51,6 +52,7 @@ class ScheduleCfg:
 @dataclass
 class TrainConfig:
     run_name: str = "debug"
+    robot: str = "g1"  # supermimic.robots name: g1 | dash
     log_root: Path = Path("logs")
     seed: int = 0
     device: str = "cuda:0"

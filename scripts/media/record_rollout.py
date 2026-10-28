@@ -18,7 +18,7 @@ import tyro
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
-from supermimic.envs.state_io import NQ, StateIO
+from supermimic.envs.state_io import StateIO
 from supermimic.eval.benchmark import load_policy_from_checkpoint
 
 
@@ -30,7 +30,7 @@ def main(ckpt: Path, clips: list[str], npz_dir: Path = Path("data/npz/bones_seed
     policy, cfg = load_policy_from_checkpoint(ckpt, device)
     n = len(files)
     args = SuperMimicEnvCfgArgs(
-        npz_files=files, num_envs=n, future_frames=cfg["env"]["future_frames"], episode_length_s=1.0e5,
+        npz_files=files, robot=cfg.get("robot", "g1"), num_envs=n, future_frames=cfg["env"]["future_frames"], episode_length_s=1.0e5,
         action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False, sampling_mode="start",
         record_transitions=False, seed=0, anchor_obs=cfg["env"].get("anchor_obs", False),
     )
@@ -50,7 +50,7 @@ def main(ckpt: Path, clips: list[str], npz_dir: Path = Path("data/npz/bones_seed
         steps = torch.zeros(n, dtype=torch.long, device=device)
 
         def snapshot() -> None:
-            rob.append(io.read()[:, :NQ].cpu().numpy())
+            rob.append(io.read()[:, : io.nq].cpu().numpy())
             ref.append(lib.ref_qpos_qvel(cmd.frame)[0].cpu().numpy())
 
         snapshot()

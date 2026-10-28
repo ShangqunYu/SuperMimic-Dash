@@ -6,7 +6,8 @@ Differences from mjlab's BeyondMimic re-implementation (``mjlab.tasks.tracking``
   * action: ``NoisyJointPositionAction`` (clean action observed, noise only executed);
   * multi-clip command with return-based reset sampling and clip-end time-outs;
   * rewards: self-collision term removed, joint-limit weight -2;
-  * terminations: pelvis height / tilt vs reference, no end-effector term, clip-end time-out;
+  * terminations: root (G1 pelvis, Dash torso) height / tilt vs reference, no end-effector
+    term, clip-end time-out;
   * events: no push; friction and encoder bias re-sampled per episode; COM at startup;
   * a ``ReplayRecorder`` streams transitions into a GPU replay buffer.
 """
@@ -15,7 +16,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from mjlab.asset_zoo.robots import G1_ACTION_SCALE, get_g1_robot_cfg
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as base_mdp
 from mjlab.envs.mdp import dr
@@ -36,6 +36,7 @@ from supermimic.envs.actions import NoisyJointPositionActionCfg
 from supermimic.envs.mdp import observations as sm_obs
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
+from supermimic.robots import get_robot
 
 class QuietSimulationCfg(SimulationCfg):
     """SimulationCfg that disables MuJoCo Warp's per-step overflow printf (a kernel build-time constant,
@@ -46,30 +47,10 @@ class QuietSimulationCfg(SimulationCfg):
         wp_opt.warn_overflow = 0
 
 
-TRACKED_BODIES = (
-    "pelvis",
-    "left_hip_roll_link",
-    "left_knee_link",
-    "left_ankle_roll_link",
-    "right_hip_roll_link",
-    "right_knee_link",
-    "right_ankle_roll_link",
-    "torso_link",
-    "left_shoulder_roll_link",
-    "left_elbow_link",
-    "left_wrist_yaw_link",
-    "right_shoulder_roll_link",
-    "right_elbow_link",
-    "right_wrist_yaw_link",
-)
-ANCHOR_BODY = "torso_link"
-ROOT_BODY = "pelvis"
-FOOT_GEOM_REGEX = r"^(left|right)_foot[1-7]_collision$"
-
-
 @dataclass
 class SuperMimicEnvCfgArgs:
     npz_files: list[str]
+    robot: str = "g1"  # supermimic.robots name
     num_envs: int = 4096
     future_frames: int = 10
     history_length: int = 10
@@ -78,6 +59,9 @@ class SuperMimicEnvCfgArgs:
     obs_noise: bool = True
     reset_noise: bool = True
     domain_randomization: bool = True
+    # Robot's hardware-derived randomization (mass, PD gains, armature, joint friction,
+    # wider COM) plus actuator command delay, on top of the paper's xi randomization.
+    hardware_dr: bool = False
     sampling_mode: str = "return"  # return | uniform | start
     replay_capacity: int = 1000
     record_transitions: bool = True
@@ -93,6 +77,7 @@ class SuperMimicEnvCfgArgs:
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
+    robot = get_robot(a.robot)
     # ---------------------------------------------------------------- observations
     noise = (lambda lo, hi: Unoise(n_min=lo, n_max=hi)) if a.obs_noise else (lambda lo, hi: None)
     policy_terms = {
@@ -132,7 +117,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         "joint_pos": NoisyJointPositionActionCfg(
             entity_name="robot",
             actuator_names=(".*",),
-            scale=G1_ACTION_SCALE,
+            scale=robot.action_scale(),
             use_default_offset=True,
             noise_std=a.action_noise_std,
         )
@@ -144,9 +129,9 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     commands = {
         "motion": MultiClipMotionCommandCfg(
             npz_files=[str(f) for f in a.npz_files],
-            anchor_body_name=ANCHOR_BODY,
-            root_body_name=ROOT_BODY,
-            body_names=TRACKED_BODIES,
+            robot=robot.name,
+            anchor_body_name=robot.anchor_body,
+            body_names=robot.tracked_bodies,
             entity_name="robot",
             future_frames=a.future_frames,
             bin_frames=a.bin_frames,
@@ -162,12 +147,14 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
 
     # ---------------------------------------------------------------- events (plan D8)
     events: dict[str, EventTermCfg] = {}
+    if a.hardware_dr and not a.domain_randomization:
+        raise ValueError("hardware_dr needs domain_randomization")
     if a.domain_randomization:
         events["base_com"] = EventTermCfg(
             mode="startup",
             func=dr.body_com_offset,
             params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
+                "asset_cfg": SceneEntityCfg("robot", body_names=(robot.com_body,)),
                 "operation": "add",
                 "ranges": {0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)},
             },
@@ -181,19 +168,23 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             mode="reset",
             func=dr.geom_friction,
             params={
-                "asset_cfg": SceneEntityCfg("robot", geom_names=FOOT_GEOM_REGEX),
+                "asset_cfg": SceneEntityCfg("robot", geom_names=robot.foot_geom_regex),
                 "operation": "abs",
                 "ranges": (0.3, 1.2),
                 "shared_random": True,
             },
         )
+        if a.hardware_dr:
+            if robot.hardware_dr is None:
+                raise ValueError(f"robot {robot.name} has no hardware randomization")
+            robot.hardware_dr(events)
     else:
         # Evaluation protocol: foot friction fixed at 1.0, no other randomization.
         events["foot_friction"] = EventTermCfg(
             mode="startup",
             func=dr.geom_friction,
             params={
-                "asset_cfg": SceneEntityCfg("robot", geom_names=FOOT_GEOM_REGEX),
+                "asset_cfg": SceneEntityCfg("robot", geom_names=robot.foot_geom_regex),
                 "operation": "abs",
                 "ranges": (1.0, 1.0),
                 "shared_random": True,
@@ -222,10 +213,10 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
 
     recorders = {}
     if a.record_transitions:
-        recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": FOOT_GEOM_REGEX, "com_body_name": "torso_link"})
+        recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot.foot_geom_regex, "com_body_name": robot.com_body})
 
     cfg = ManagerBasedRlEnvCfg(
-        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": get_g1_robot_cfg()}),
+        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.hardware_dr else robot.entity_cfg()}),
         observations=observations,
         actions=actions,
         commands=commands,
@@ -233,8 +224,8 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         rewards=rewards,
         terminations=terminations,
         recorders=recorders,
-        viewer=ViewerConfig(origin_type=ViewerConfig.OriginType.ASSET_BODY, entity_name="robot", body_name="torso_link", distance=2.8, fovy=55.0, elevation=-5.0, azimuth=120.0),
-        sim=QuietSimulationCfg(nconmax=35, njmax=250, mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20)),
+        viewer=ViewerConfig(origin_type=ViewerConfig.OriginType.ASSET_BODY, entity_name="robot", body_name=robot.anchor_body, distance=2.8, fovy=55.0, elevation=-5.0, azimuth=120.0),
+        sim=QuietSimulationCfg(nconmax=robot.nconmax, njmax=robot.njmax, mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20)),
         decimation=4,
         episode_length_s=a.episode_length_s,
         seed=a.seed,

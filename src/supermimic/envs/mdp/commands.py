@@ -4,7 +4,7 @@ Exposes the same attribute API as mjlab's ``MotionCommand`` (``anchor_pos_w``,
 ``robot_body_pos_w``, ``body_pos_relative_w`` ...) so mjlab's tracking reward
 functions work unchanged, plus:
 
-* ``goal``        (N, K*68) future-frame goal features (plan D5)
+* ``goal``        (N, K*(2NJ+10)) future-frame goal features (plan D5)
 * ``root_*``      reference pelvis quantities for the paper's root terminations
 * ``clip_end``    (N,) True once the clip's last frame has been reached (time-out)
 * return-based reset sampling over 1 s bins of the whole library (plan D14)
@@ -29,6 +29,7 @@ from mjlab.utils.lab_api.math import (
 )
 
 from supermimic.envs.mdp.motion_library import MotionLibrary
+from supermimic.robots import get_robot
 
 if TYPE_CHECKING:
     from mjlab.entity import Entity
@@ -48,11 +49,12 @@ class MultiClipMotionCommand(CommandTerm):
         self.body_indexes = torch.tensor(
             self.robot.find_bodies(cfg.body_names, preserve_order=True)[0], dtype=torch.long, device=self.device
         )
-        self.robot_root_body_index = self.robot.body_names.index(cfg.root_body_name)
+        spec = get_robot(cfg.robot)
+        self.robot_root_body_index = self.robot.body_names.index(spec.root_body)
 
         default_joint_pos = self.robot.data.default_joint_pos[0].detach()
         self.library = MotionLibrary(
-            cfg.npz_files, cfg.body_names, default_joint_pos, device=self.device, bin_frames=cfg.bin_frames,
+            cfg.npz_files, cfg.body_names, default_joint_pos, robot=spec, device=self.device, bin_frames=cfg.bin_frames,
             compact=cfg.compact_library, store_dtype=torch.float16 if cfg.library_fp16 else torch.float32,
         )
         print(f"[INFO] {self.library.summary()}")
@@ -397,8 +399,8 @@ class MultiClipMotionCommand(CommandTerm):
 @dataclass(kw_only=True)
 class MultiClipMotionCommandCfg(CommandTermCfg):
     npz_files: list[str]
+    robot: str  # robot spec name (supermimic.robots); its root body is the free-joint root
     anchor_body_name: str
-    root_body_name: str = "pelvis"
     body_names: tuple[str, ...]
     entity_name: str = "robot"
     future_frames: int = 10

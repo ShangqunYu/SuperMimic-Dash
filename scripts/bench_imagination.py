@@ -9,30 +9,31 @@ import torch
 import tyro
 
 
-def main(batch: int = 2048, horizon: int = 32, modes: tuple[str, ...] = ("eager", "default"), reps: int = 3, clips: int = 1) -> None:
-    from supermimic.data.motion_convert import load_g1_model
+def main(batch: int = 2048, horizon: int = 32, modes: tuple[str, ...] = ("eager", "default"), reps: int = 3, clips: int = 1, robot: str = "g1", npz_dir: Path = Path("data/npz/lafan1")) -> None:
     from supermimic.data.replay_buffer import StartBatch
     from supermimic.envs.mdp.motion_library import MotionLibrary, discover_npz
-    from supermimic.envs.tracking_env_cfg import ANCHOR_BODY, ROOT_BODY, TRACKED_BODIES
     from supermimic.imagination.compiled import ImagStep
     from supermimic.imagination.objective import policy_objective
     from supermimic.imagination.rollout import imagine
-    from supermimic.kinematics.g1_fk import G1Kinematics
+    from supermimic.kinematics.fk import Kinematics
     from supermimic.policy.nets import Policy, PolicyCfg
+    from supermimic.robots import get_robot
     from supermimic.world_model.heads import AnalyticHeads
     from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
     torch.backends.cuda.matmul.allow_tf32 = True
     dev = "cuda:0"
-    model = load_g1_model()
-    files = discover_npz(Path("data/npz/lafan1"), limit=clips)
-    q0 = torch.zeros(29, device=dev)
-    lib = MotionLibrary(files, TRACKED_BODIES, q0, device=dev)
-    fk = G1Kinematics(model, device=dev)
+    spec = get_robot(robot)
+    nj = spec.num_joints
+    model = spec.load_model()
+    files = discover_npz(npz_dir, limit=clips)
+    q0 = torch.zeros(nj, device=dev)
+    lib = MotionLibrary(files, spec.tracked_bodies, q0, robot=spec, device=dev)
+    fk = Kinematics(model, device=dev)
     lim = torch.as_tensor(model.jnt_range[1:], dtype=torch.float32, device=dev)
-    heads = AnalyticHeads(fk, TRACKED_BODIES, ANCHOR_BODY, ROOT_BODY, lim, q0)
+    heads = AnalyticHeads(fk, spec.tracked_bodies, spec.anchor_body, spec.root_body, lim, q0)
     wm = WorldModel(WorldModelCfg(), heads, dev)
-    policy = Policy(PolicyCfg()).to(dev)
+    policy = Policy(PolicyCfg(num_joints=nj, goal_dim=10 * spec.goal_feat_dim)).to(dev)
 
     # Synthetic start batch from library reference states.
     f = torch.randint(0, lib.num_frames - 100, (batch,), device=dev)
@@ -40,11 +41,11 @@ def main(batch: int = 2048, horizon: int = 32, modes: tuple[str, ...] = ("eager"
     s0 = torch.cat([qpos, qvel], -1)
     start = StartBatch(
         state=s0,
-        xi=torch.zeros(batch, 33, device=dev) + torch.tensor([0.75] + [0.0] * 32, device=dev),
+        xi=torch.zeros(batch, spec.xi_dim, device=dev) + torch.tensor([0.75] + [0.0] * (spec.xi_dim - 1), device=dev),
         frame=f,
-        prev_action=torch.zeros(batch, 29, device=dev),
-        hist_states=s0[None].expand(10, batch, 71).contiguous(),
-        hist_actions=torch.zeros(10, batch, 29, device=dev),
+        prev_action=torch.zeros(batch, nj, device=dev),
+        hist_states=s0[None].expand(10, batch, spec.state_dim).contiguous(),
+        hist_actions=torch.zeros(10, batch, nj, device=dev),
     )
     for mode in modes:
         step_fn = ImagStep(wm, q0, compile_mode=None if mode == "eager" else mode)

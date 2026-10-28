@@ -1,27 +1,29 @@
 """State representation for the world model (plan D1–D3).
 
-Simulator state  s = [root_pos(3), root_quat wxyz(4), joint_pos(29), root_lin_vel_w(3),
-                      root_ang_vel_b(3), joint_vel(29)]            (71, MuJoCo layout, origin-free)
+NJ = number of hinge joints (29 for the G1, 18 for Dash), see ``supermimic.robots``.
 
-Canonical features (network input, heading-invariant, 71):
+Simulator state  s = [root_pos(3), root_quat wxyz(4), joint_pos(NJ), root_lin_vel_w(3),
+                      root_ang_vel_b(3), joint_vel(NJ)]      (13 + 2 NJ, MuJoCo layout, origin-free)
+
+Canonical features (network input, heading-invariant, 13 + 2 NJ):
     [root_z(1), rot6d(heading^-1 ⊗ root_quat)(6), root_lin_vel in heading frame(3),
-     root_ang_vel_b(3), joint_pos(29), joint_vel(29)]
+     root_ang_vel_b(3), joint_pos(NJ), joint_vel(NJ)]
 
-Network output ``delta`` (70) and the integration step (dt = 0.02 s):
-    dv_h(3), dw_b(3), dqd(29)            velocity increments, heading / body frame
-    dp_h(3), dth_b(3), dq(29)            position corrections on top of explicit integration
+Network output ``delta`` (12 + 2 NJ) and the integration step (dt = 0.02 s):
+    dv_h(3), dw_b(3), dqd(NJ)            velocity increments, heading / body frame
+    dp_h(3), dth_b(3), dq(NJ)            position corrections on top of explicit integration
     v'  = v + R_h dv_h               w' = w + dw_b          qd' = qd + dqd
     p'  = p + dt v' + R_h dp_h       q' = q ⊗ exp(dt w' + dth_b)    qj' = qj + dt qd' + dq
 With zero output the model extrapolates at constant velocity (a physical prior); the
 last layer of the dynamics MLP is zero-initialised so training starts from it.
 
 Loss / error normalisation (D3): per-quantity nominal scales sigma applied to the
-70-d error vector [dp(3), rotvec(3), dv(3), dw(3), dq(29), dqd(29)].
+(12 + 2 NJ)-d error vector [dp(3), rotvec(3), dv(3), dw(3), dq(NJ), dqd(NJ)].
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 
@@ -37,12 +39,6 @@ from supermimic.kinematics.rotations import (
     rotvec_from_quat,
 )
 
-STATE_DIM = 71
-FEAT_DIM = 71
-DELTA_DIM = 70
-NJ = 29
-
-
 @dataclass
 class StateSpecCfg:
     dt: float = 0.02
@@ -53,30 +49,34 @@ class StateSpecCfg:
     # Input feature scales for [root_z, rot6d, lin_vel_h, ang_vel_b, joint_pos, joint_vel] (divide by these).
     in_scale: tuple[float, ...] = (1.0, 1.0, 1.0, 2.0, 1.0, 5.0)
     explicit_integration: bool = True
-    # xi normalisation: (offset, scale) for friction, encoder bias, com offset.
-    xi_offset: tuple[float, ...] = field(default_factory=lambda: (0.75,) + (0.0,) * 29 + (0.0,) * 3)
-    xi_scale: tuple[float, ...] = field(default_factory=lambda: (0.45,) + (0.01,) * 29 + (0.05,) * 3)
+    # xi normalisation: (offset, scale) for [friction, encoder bias, com offset].
+    xi_offset: tuple[float, ...] = (0.75, 0.0, 0.0)
+    xi_scale: tuple[float, ...] = (0.45, 0.01, 0.05)
 
 
 class StateSpec:
-    def __init__(self, cfg: StateSpecCfg, device, dtype=torch.float32):
+    def __init__(self, cfg: StateSpecCfg, device, num_joints: int, dtype=torch.float32):
         self.cfg = cfg
         self.dt = cfg.dt
+        nj = self.nj = num_joints
+        self.state_dim = self.feat_dim = 13 + 2 * nj
+        self.delta_dim = 12 + 2 * nj
+        self.xi_dim = 4 + nj
         rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])  # noqa: E731
-        self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
-        self.out_scale = rep(cfg.out_scale, (3, 3, NJ, 3, 3, NJ)).to(device=device, dtype=dtype)
-        self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
-        self.xi_offset = torch.tensor(cfg.xi_offset, device=device, dtype=dtype)
-        self.xi_scale = torch.tensor(cfg.xi_scale, device=device, dtype=dtype)
+        self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, nj, nj)).to(device=device, dtype=dtype)
+        self.out_scale = rep(cfg.out_scale, (3, 3, nj, 3, 3, nj)).to(device=device, dtype=dtype)
+        self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, nj, nj)).to(device=device, dtype=dtype)
+        self.xi_offset = rep(cfg.xi_offset, (1, nj, 3)).to(device=device, dtype=dtype)
+        self.xi_scale = rep(cfg.xi_scale, (1, nj, 3)).to(device=device, dtype=dtype)
 
     # ------------------------------------------------------------------ split / features
 
-    @staticmethod
-    def split(s: torch.Tensor):
-        return s[..., 0:3], s[..., 3:7], s[..., 7:36], s[..., 36:39], s[..., 39:42], s[..., 42:71]
+    def split(self, s: torch.Tensor):
+        nj = self.nj
+        return s[..., 0:3], s[..., 3:7], s[..., 7 : 7 + nj], s[..., 7 + nj : 10 + nj], s[..., 10 + nj : 13 + nj], s[..., 13 + nj : 13 + 2 * nj]
 
     def canonical(self, s: torch.Tensor) -> torch.Tensor:
-        """Heading-invariant, scaled network input features (…, 71)."""
+        """Heading-invariant, scaled network input features (…, 13 + 2 NJ)."""
         p, q, qj, v, w, qd = self.split(s)
         q = quat_normalize(q)
         hq = heading_quat(q)
@@ -91,9 +91,11 @@ class StateSpec:
     # ------------------------------------------------------------------ integration
 
     def integrate(self, s: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
-        """Apply the (unscaled) network output ``delta`` (…, 70) to state ``s`` (…, 71)."""
+        """Apply the (unscaled) network output ``delta`` (…, 12 + 2 NJ) to state ``s`` (…, 13 + 2 NJ)."""
         d = delta * self.out_scale
-        dv_h, dw_b, dqd, dp_h, dth_b, dq = d[..., 0:3], d[..., 3:6], d[..., 6:35], d[..., 35:38], d[..., 38:41], d[..., 41:70]
+        nj = self.nj
+        dv_h, dw_b, dqd = d[..., 0:3], d[..., 3:6], d[..., 6 : 6 + nj]
+        dp_h, dth_b, dq = d[..., 6 + nj : 9 + nj], d[..., 9 + nj : 12 + nj], d[..., 12 + nj : 12 + 2 * nj]
         p, q, qj, v, w, qd = self.split(s)
         q = quat_normalize(q)
         hq = heading_quat(q)
@@ -109,7 +111,7 @@ class StateSpec:
     # ------------------------------------------------------------------ errors
 
     def error_vector(self, s_pred: torch.Tensor, s_true: torch.Tensor) -> torch.Tensor:
-        """Normalised 70-d error [dp, rotvec, dv, dw, dq, dqd] / sigma."""
+        """Normalised (12 + 2 NJ)-d error [dp, rotvec, dv, dw, dq, dqd] / sigma."""
         p1, q1, qj1, v1, w1, qd1 = self.split(s_pred)
         p2, q2, qj2, v2, w2, qd2 = self.split(s_true)
         q1 = quat_normalize(q1)

@@ -11,6 +11,6 @@ if TYPE_CHECKING:
 
 
 def goal_future_frames(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
-    """(N, K*68) future reference-frame features (plan D5)."""
+    """(N, K*(2NJ+10)) future reference-frame features (plan D5)."""
     command = cast(MultiClipMotionCommand, env.command_manager.get_term(command_name))
     return command.goal

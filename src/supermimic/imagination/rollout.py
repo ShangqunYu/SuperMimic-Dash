@@ -14,19 +14,24 @@ from supermimic.world_model.heads import ReferenceFrame, analytic_observation, a
 from supermimic.world_model.wm_trainer import reference_at
 from supermimic.world_model.world_model import WorldModel
 
-# Paper Table A.1 sensor noise (uniform half-widths) in the 93-d observation order.
-OBS_NOISE_HALF = torch.tensor([0.01] * 29 + [0.5] * 29 + [0.2] * 3 + [0.05] * 3 + [0.0] * 29)
+
+
+def obs_noise_half(nj: int) -> torch.Tensor:
+    """Paper Table A.1 sensor noise (uniform half-widths) in the (3 NJ + 6)-d observation order."""
+    return torch.tensor([0.01] * nj + [0.5] * nj + [0.2] * 3 + [0.05] * 3 + [0.0] * nj)
+
+
 ANCHOR_NOISE_HALF = torch.tensor([0.25] * 3 + [0.05] * 6)
 
 
 @dataclass
 class ImagRollout:
-    states: torch.Tensor  # (H+1, n, 71)
-    actions: torch.Tensor  # (H, n, 29)
+    states: torch.Tensor  # (H+1, n, 13+2NJ)
+    actions: torch.Tensor  # (H, n, NJ)
     rewards: torch.Tensor  # (H, n)      r_{t+1}
     dhat: torch.Tensor  # (H+1, n)    predicted termination prob of s_t (d_0 = 0)
     survival: torch.Tensor  # (H+1, n)    c_t
-    goals: torch.Tensor  # (H+1, n, 680)
+    goals: torch.Tensor  # (H+1, n, goal_dim)
     e_root: torch.Tensor  # (H+1, n, 4)
     frames: torch.Tensor  # (H+1, n)
     reward_terms: dict  # mean of each reward term over the rollout (diagnostics)
@@ -47,7 +52,7 @@ def imagine(
     n = start.state.shape[0]
     q0 = lib.default_joint_pos
     step_fn = step_fn or ImagStep(wm, q0)
-    noise_half = OBS_NOISE_HALF.to(device)
+    noise_half = obs_noise_half(wm.num_joints).to(device)
     anchor_noise_half = ANCHOR_NOISE_HALF.to(device)
     ai = wm.heads.anchor_index
 
