@@ -5,8 +5,7 @@ README.md). **The goal now is to port it to Dash**, our own 18-DOF humanoid,
 and train a SuperMimic-style tracking foundation model on our BONES-SEED
 retargets. Training will run on a machine with an RTX 6000 Pro (96 GB).
 
-The port is in progress on branch `dash-port` (uncommitted as of 2026-10-27:
-git is not set up on the lab server). See "Port status" below. The data-pipeline
+The port is in progress on branch `dash-port` (pushed to origin 2026-10-28). See "Port status" below. The data-pipeline
 scripts that produced the dataset are in `scripts/dash_data/`.
 
 Always use `uv run`. Prefix with `env -u PYTHONPATH` if the shell has ROS or
@@ -142,6 +141,21 @@ G1 regression tests run.
 - **Run `dash_e1_sim`** (started 2026-10-27 ~20:15, GPU 0): sim-only (paper xi DR, no
   hardware DR), all 64,103 clips, 4096 envs, 100k iterations (cosine decay over 78k),
   ~3.6 it/s ≈ 8 h. Log `logs/dash_e1_sim.out`, checkpoints `logs/dash_e1_sim/`.
+  Finished 2026-10-28 05:06 (8.9 h): train return plateaued at ~0.72 from ~50k,
+  wm nse1 0.0036 / nse8 0.0047. Under training noise + DR it falls in 0.4-0.9% of
+  episodes. Not deployable (no hardware DR; trained with the sampler bug below).
+- **Reset-sampler fix (2026-10-28).** With raw discounted returns-to-go (paper, D14) the
+  last bin of every clip has a low G_b only because few steps remain; with 64k short
+  Dash clips (median 5.2 s) the hard term piled onto clip endings: in `dash_e1_sim`
+  half of the clip-end episodes lasted <= 4 steps and the mean episode was 2.4 s
+  (4.8 s expected with no falls). `MultiClipMotionCommandCfg.return_norm="horizon"`
+  (default) divides R_t by 1 - gamma^h_t, h_t = steps the return could cover (episode
+  steps left, plus the unreached clip frames after a fall). Same checkpoint, fresh
+  sampler: clip-end median 4 -> 134 steps, mean episode 120 -> 220 steps (uniform:
+  236). `return_norm="none"` restores the paper behaviour. Note the critic bootstrap
+  of D14 was never wired (`bootstrap_fn` is None): time-outs drop their last 100 steps.
+- The lab server is shared: other users' jobs can take both GPUs (seen 2026-10-28),
+  which slowed `dash_e1_sim` from 3.6 to 2.6 it/s after ~60k.
 
 ## Original port plan
 

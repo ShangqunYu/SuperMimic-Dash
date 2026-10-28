@@ -233,6 +233,18 @@ class MultiClipMotionCommand(CommandTerm):
             else:
                 remaining = lens[:, None] - torch.arange(T, device=self.device)[None, :]
                 tmask = tmask & ~(truncated[:, None] & (remaining < cfg.min_remaining_steps))
+        if cfg.return_norm == "horizon":
+            # Rescale R_t to an infinite-horizon equivalent, R_t / (1 - gamma^h_t), where h_t is the
+            # number of steps the return could have covered: the steps left in the episode plus, if
+            # the robot fell (or a time-out was bootstrapped), the clip frames it never reached. A
+            # clip ending is then no longer "hard" just because few steps remain in it; a fall
+            # keeps its full horizon (gamma^h ~ 0) and so still reads as low.
+            steps_left = (lens[:, None] - torch.arange(T, device=self.device)[None, :]).clamp_min(1)
+            end = self.frame[env_ids]
+            unreached = (self.library.last_frame_of(end) - end).clamp_min(0)
+            covers_rest = terminated | (truncated & (self.bootstrap_fn is not None))
+            h = steps_left + (covers_rest.long() * unreached)[:, None]
+            rtg = rtg / (1.0 - cfg.gamma ** h.double())
         valid = tmask.reshape(-1)
         b = bins.reshape(-1)[valid]
         g = rtg.reshape(-1)[valid].float()
@@ -418,6 +430,11 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     gamma: float = 0.99
     ema_alpha: float = 0.05
     memory_alpha: float = 0.01
+    # "horizon": normalize each return-to-go by the horizon it could cover, so bins at the end of a
+    # clip are not mistaken for hard ones (matters for libraries of many short clips: on Dash
+    # BONES-SEED, "none" put half of all clip-end episodes within 4 steps of the end).
+    # "none": raw discounted return-to-go, as in the paper (plan D14).
+    return_norm: Literal["horizon", "none"] = "horizon"
     min_remaining_steps: int = 100
     max_logged_steps: int = 1024
     compact_library: bool = False
