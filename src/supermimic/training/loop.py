@@ -31,6 +31,8 @@ class Trainer:
         cfg.policy.num_joints = spec.num_joints
         cfg.policy.goal_dim = cfg.env.future_frames * spec.goal_feat_dim + (9 if cfg.env.anchor_obs else 0)
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
+        # With hardware DR, its parameters (per joint and per body) enter xi (envs/sim_context.py).
+        cfg.world_model.state_spec.xi_hw_bodies = spec.num_bodies if cfg.env.hardware_dr else 0
         self.rank, local_rank, self.world = init_distributed()
         self.is_main = self.rank == 0
         if self.world > 1:
@@ -66,6 +68,7 @@ class Trainer:
                 reset_noise=cfg.env.reset_noise,
                 domain_randomization=cfg.env.domain_randomization,
                 hardware_dr=cfg.env.hardware_dr,
+                command_delay=cfg.env.command_delay,
                 sampling_mode=cfg.env.sampling_mode,
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
@@ -85,7 +88,8 @@ class Trainer:
         heads = AnalyticHeads(fk, spec.tracked_bodies, spec.anchor_body, spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         self.wm = WorldModel(cfg.world_model, heads, self.device)
         self.policy = Policy(cfg.policy).to(self.device)
-        self.critic = Critic(cfg.critic, pcfg=cfg.policy).to(self.device)
+        self.critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=self.wm.spec.xi_dim).to(self.device)
+        assert self.buffer.xi.shape[-1] == self.wm.spec.xi_dim, (self.buffer.xi.shape, self.wm.spec.xi_dim)
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)

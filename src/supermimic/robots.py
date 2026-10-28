@@ -5,6 +5,8 @@ Every network / state dimension follows from the number of actuated hinge joints
   state  s  = [root_pos 3, root_quat 4, joint_pos NJ, root_lin_vel_w 3, root_ang_vel_b 3, joint_vel NJ]
             = qpos (7 + NJ) | qvel (6 + NJ)                                         13 + 2 NJ
   xi        = [foot friction 1, encoder bias NJ, COM offset 3]                       4 + NJ
+              (+ [kp scale NJ, kd scale NJ, armature NJ, joint friction NJ, mass scale NB]
+               with hardware DR: Dash 22 -> 113)
   obs frame = [joint_pos NJ, joint_vel NJ, base_ang_vel 3, projected_gravity 3, last_action NJ]
                                                                                      3 NJ + 6
   goal frame = [joint_pos - q0 NJ, joint_vel NJ, grav 3, ang_vel_b 3, lin_vel_h 3, height 1]
@@ -27,8 +29,9 @@ def state_dim(nj: int) -> int:
     return 13 + 2 * nj
 
 
-def xi_dim(nj: int) -> int:
-    return 4 + nj
+def xi_dim(nj: int, num_bodies: int = 0, hardware: bool = False) -> int:
+    """Base xi 4 + NJ; with hardware DR also kp/kd scale, armature, friction (NJ each) and mass scale (NB)."""
+    return 4 + nj + ((4 * nj + num_bodies) if hardware else 0)
 
 
 def obs_dim(nj: int) -> int:
@@ -96,6 +99,10 @@ class RobotSpec:
         root = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, 1)
         assert root == self.root_body, f"{self.name}: first body is {root}, spec says {self.root_body}"
         return model
+
+    @property
+    def num_bodies(self) -> int:
+        return len(self.body_names())
 
     def body_names(self) -> tuple[str, ...]:
         """All bodies in model order (world excluded): the body axis of our npz files."""

@@ -8,7 +8,8 @@ import torch
 import torch.nn as nn
 
 from supermimic.world_model.dynamics import MLP
-from supermimic.robots import goal_feat_dim, obs_dim, state_dim, xi_dim
+from supermimic.robots import goal_feat_dim, obs_dim, state_dim
+from supermimic.robots import xi_dim as base_xi_dim
 from supermimic.world_model.heads import obs_terms
 
 LATENT_DIM = 32
@@ -88,14 +89,16 @@ class Policy(nn.Module):
 
 
 class Critic(nn.Module):
-    """V(canonical state 13+2NJ, goal, xi 4+NJ, root error 4) -> scalar (one per interface)."""
+    """V(canonical state 13+2NJ, goal, xi, root error 4) -> scalar (one per interface).
 
-    def __init__(self, cfg: CriticCfg, goal_dim: int | None = None, pcfg: PolicyCfg | None = None):
+    ``xi_dim`` defaults to the base 4+NJ; pass the world model's when xi carries hardware DR."""
+
+    def __init__(self, cfg: CriticCfg, goal_dim: int | None = None, pcfg: PolicyCfg | None = None, xi_dim: int | None = None):
         super().__init__()
         pcfg = pcfg or PolicyCfg()
         goal_dim = goal_dim or pcfg.goal_dim
         nj = pcfg.num_joints
-        self.mlp = MLP(state_dim(nj) + goal_dim + xi_dim(nj) + 4, cfg.hidden, 1)
+        self.mlp = MLP(state_dim(nj) + goal_dim + (xi_dim or base_xi_dim(nj)) + 4, cfg.hidden, 1)
         self.register_buffer("goal_scale", _goal_scale_vector(pcfg, goal_dim))
 
     def forward(self, feat: torch.Tensor, goal: torch.Tensor, xi_norm: torch.Tensor, e_root: torch.Tensor) -> torch.Tensor:

@@ -38,6 +38,7 @@ from supermimic.kinematics.rotations import (
     rot6d_from_quat,
     rotvec_from_quat,
 )
+from supermimic.robots import xi_dim
 
 @dataclass
 class StateSpecCfg:
@@ -52,6 +53,13 @@ class StateSpecCfg:
     # xi normalisation: (offset, scale) for [friction, encoder bias, com offset].
     xi_offset: tuple[float, ...] = (0.75, 0.0, 0.0)
     xi_scale: tuple[float, ...] = (0.45, 0.01, 0.05)
+    # Hardware randomization in xi (envs/sim_context.py): 0 = absent, else the robot's body
+    # count. Normalisation for [kp scale, kd scale, armature, joint friction, mass scale],
+    # centred on Dash's ranges (kp 0.8-1.2, kd 0.7-1.3, armature 0.008-0.05, friction 0-2.5,
+    # mass 0.88-1.05).
+    xi_hw_bodies: int = 0
+    xi_hw_offset: tuple[float, ...] = (1.0, 1.0, 0.02, 1.0, 0.965)
+    xi_hw_scale: tuple[float, ...] = (0.2, 0.3, 0.015, 1.0, 0.05)
 
 
 class StateSpec:
@@ -61,13 +69,20 @@ class StateSpec:
         nj = self.nj = num_joints
         self.state_dim = self.feat_dim = 13 + 2 * nj
         self.delta_dim = 12 + 2 * nj
-        self.xi_dim = 4 + nj
+        nb = cfg.xi_hw_bodies
+        self.xi_dim = xi_dim(nj, nb, hardware=nb > 0)
         rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])  # noqa: E731
         self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, nj, nj)).to(device=device, dtype=dtype)
         self.out_scale = rep(cfg.out_scale, (3, 3, nj, 3, 3, nj)).to(device=device, dtype=dtype)
         self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, nj, nj)).to(device=device, dtype=dtype)
-        self.xi_offset = rep(cfg.xi_offset, (1, nj, 3)).to(device=device, dtype=dtype)
-        self.xi_scale = rep(cfg.xi_scale, (1, nj, 3)).to(device=device, dtype=dtype)
+        xi_offset, xi_scale, xi_sizes = list(cfg.xi_offset), list(cfg.xi_scale), [1, nj, 3]
+        if nb > 0:
+            xi_offset += cfg.xi_hw_offset
+            xi_scale += cfg.xi_hw_scale
+            xi_sizes += [nj, nj, nj, nj, nb]
+        self.xi_offset = rep(xi_offset, xi_sizes).to(device=device, dtype=dtype)
+        self.xi_scale = rep(xi_scale, xi_sizes).to(device=device, dtype=dtype)
+        assert self.xi_offset.numel() == self.xi_dim
 
     # ------------------------------------------------------------------ split / features
 

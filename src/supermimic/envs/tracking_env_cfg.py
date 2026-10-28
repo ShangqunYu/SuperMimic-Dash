@@ -60,8 +60,11 @@ class SuperMimicEnvCfgArgs:
     reset_noise: bool = True
     domain_randomization: bool = True
     # Robot's hardware-derived randomization (mass, PD gains, armature, joint friction,
-    # wider COM) plus actuator command delay, on top of the paper's xi randomization.
+    # wider COM) on top of the paper's xi randomization; all of it enters xi.
     hardware_dr: bool = False
+    # Actuator command delay (0-25 ms on Dash). Separate from hardware_dr: a delay makes s'
+    # depend on earlier actions, which the world model does not see.
+    command_delay: bool = False
     sampling_mode: str = "return"  # return | uniform | start
     replay_capacity: int = 1000
     record_transitions: bool = True
@@ -213,10 +216,10 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
 
     recorders = {}
     if a.record_transitions:
-        recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot.foot_geom_regex, "com_body_name": robot.com_body})
+        recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot.foot_geom_regex, "com_body_name": robot.com_body, "hardware_xi": a.hardware_dr})
 
     cfg = ManagerBasedRlEnvCfg(
-        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.hardware_dr else robot.entity_cfg()}),
+        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.command_delay else robot.entity_cfg()}),
         observations=observations,
         actions=actions,
         commands=commands,

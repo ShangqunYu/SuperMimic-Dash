@@ -123,11 +123,17 @@ G1 regression tests run.
     libraries record the robot and refuse a mismatch.
   - `src/supermimic/assets/dash/`: vendored XML, meshes and constants from
     mjlab_dash 0d56f20. Forearm-thigh hulls always on. Actuator command delay
-    (0-25 ms) only with `--env.hardware-dr`: a delay longer than one control step makes
-    s' depend on the previous action, which the world model does not see.
+    (0-25 ms) only with `--env.command-delay` (see below).
   - Hardware DR (`--env.hardware-dr`, off by default): mass, PD gains, armature, joint
-    friction, wider COM, command delay. Only the COM enters xi. COM x is mjlab_dash's
-    walking range (-0.06, 0.06); its tracking task pins -0.06 (d819b37). Open question.
+    friction, wider COM. COM x is mjlab_dash's walking range (-0.06, 0.06) (its tracking
+    task pins -0.06, d819b37; we keep the range by choice). **All of it enters xi**
+    (2026-10-28): kp/kd scale, armature, joint friction per joint and mass scale per body
+    are appended, xi 22 -> 113 (`envs/sim_context.py`, `StateSpecCfg.xi_hw_bodies`, set
+    by the training loop). Reason: the policy learns only in imagination, so a parameter
+    the world model cannot see is averaged out and the policy never trains against its
+    variation. Checked by `tests/test_sim_context.py`.
+  - Command delay (0-25 ms) is a separate flag, `--env.command-delay`, off: a delay
+    makes s' depend on earlier actions, which the world model does not take as input.
   - Tests cover Dash FK vs MuJoCo, npz vs FK, and the analytic reward/obs/termination vs
     the simulator (parametrized g1/dash).
 - **Observations.** Open-loop PD on the reference joints falls within ~0.5 s (kp=80
