@@ -5,7 +5,7 @@ README.md). **The goal now is to port it to Dash**, our own 18-DOF humanoid,
 and train a SuperMimic-style tracking foundation model on our BONES-SEED
 retargets. Training will run on a machine with an RTX 6000 Pro (96 GB).
 
-The port is in progress on branch `dash-port` (pushed to origin 2026-10-28). See "Port status" below. The data-pipeline
+The port is in progress on branch `dash-port` (pushed to origin 2026-10-28). See "Port status" below; for running a policy on the robot see `docs/DEPLOYMENT.md`. The data-pipeline
 scripts that produced the dataset are in `scripts/dash_data/`.
 
 Always use `uv run`. Prefix with `env -u PYTHONPATH` if the shell has ROS or
@@ -160,6 +160,18 @@ G1 regression tests run.
   sampler: clip-end median 4 -> 134 steps, mean episode 120 -> 220 steps (uniform:
   236). `return_norm="none"` restores the paper behaviour. Note the critic bootstrap
   of D14 was never wired (`bootstrap_fn` is None): time-outs drop their last 100 steps.
+- **Run `dash_e2_hwdr`** (2026-10-28 18:30 to 2026-10-29 04:15, GPU 0): `dash_e1_sim` plus
+  `--env.hardware-dr` (hardware xi 113), fixed sampler, no command delay. Train return dipped
+  to ~0 at 12-25k and settled at 0.33-0.45; it is not comparable to e1 (harder DR, no more
+  free 1-step episodes). wm nse1 0.0025-0.0034. **Benchmark** (all 64,103 clips, nominal, no
+  noise; `scripts/eval_benchmark.py`, results in `logs/<run>/benchmark_ckpt_latest.json`):
+  e1 498 falls (0.78%), mean score 0.887; e2 490 (0.76%), 0.882; 442 clips fail under both.
+  Floor sitting fails 13.6% (3,128 clips), lying 2/7; everything else < 0.5%. Not yet
+  measured: the benchmark with hardware DR on, which is what e2 is for.
+- **ONNX export** (2026-10-29): `scripts/export_onnx.py`, one file per clip with the policy
+  and that clip's precomputed goal features; mjlab_dash interface (obs, time_step -> actions
+  + reference). Three clips exported from `dash_e2_hwdr` (idle, forward walk, slow turn),
+  attached to the GitHub release `dash_e2_hwdr`. **Deployment handoff: `docs/DEPLOYMENT.md`.**
 - The lab server is shared: other users' jobs can take both GPUs (seen 2026-10-28),
   which slowed `dash_e1_sim` from 3.6 to 2.6 it/s after ~60k.
 
