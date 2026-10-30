@@ -35,6 +35,7 @@ class WorldModelTrainer:
         self.wm = wm
         self.lib = lib
         self.cfg = cfg
+        self.track_mask: torch.Tensor | None = None  # (E,) envs whose termination labels are reference-relative
         self.opt = torch.optim.Adam(wm.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
         wm.enable_compile(cfg.compile)
 
@@ -47,7 +48,8 @@ class WorldModelTrainer:
         # Only the root pose of the references is needed for the termination features.
         r = self.lib.ref(w.frame.reshape(-1))
         refs = [ReferenceFrame(None, None, None, None, r.root_pos_w[j * n : (j + 1) * n], r.root_quat_w[j * n : (j + 1) * n]) for j in range(k)]
-        return self.wm.window_loss(w.states, w.a_exec, w.xi, w.done, refs)
+        tw = None if self.track_mask is None else self.track_mask[w.env].float()
+        return self.wm.window_loss(w.states, w.a_exec, w.xi, w.done, refs, tw)
 
     def update(self, buffer: ReplayBuffer) -> dict[str, float]:
         agg: dict[str, torch.Tensor] = {}

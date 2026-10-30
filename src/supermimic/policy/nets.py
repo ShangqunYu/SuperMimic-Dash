@@ -28,6 +28,10 @@ class PolicyCfg:
     goal_term_scale: tuple[float, ...] = (1.0, 5.0, 1.0, 2.0, 1.0, 1.0)
     decoder_last_gain: float = 0.01
     goal_dim: int = 680  # K * (2 NJ + 10) (+9 with anchor_obs); set by the trainer
+    # Velocity interface (paper Appendix B/G): encoder of the normalized command + observation history.
+    velocity: bool = False
+    velocity_hidden: tuple[int, ...] = (256, 256)
+    cmd_scale: tuple[float, ...] = (1.5, 0.6, 1.8)  # divide (vx, vy, wz); set from VelocityCfg by the trainer
 
     @property
     def obs_dim(self) -> int:
@@ -65,6 +69,19 @@ class MotionEncoder(nn.Module):
         return torch.tanh(self.mlp(goal * self.scale))
 
 
+class VelocityEncoder(nn.Module):
+    """z = tanh(MLP([cmd / cmd_scale, o_hist * obs_scale])) (Table A.4: normalized command + recent observations)."""
+
+    def __init__(self, cfg: PolicyCfg):
+        super().__init__()
+        self.mlp = MLP(3 + cfg.obs_dim, cfg.velocity_hidden, cfg.latent_dim)
+        self.register_buffer("cmd_scale", 1.0 / torch.tensor(cfg.cmd_scale, dtype=torch.float32))
+        self.register_buffer("obs_scale", _obs_scale_vector(cfg))
+
+    def forward(self, cmd: torch.Tensor, obs_hist: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.mlp(torch.cat([cmd * self.cmd_scale, obs_hist * self.obs_scale], dim=-1)))
+
+
 class Decoder(nn.Module):
     def __init__(self, cfg: PolicyCfg):
         super().__init__()
@@ -76,16 +93,32 @@ class Decoder(nn.Module):
 
 
 class Policy(nn.Module):
-    """a = dec(enc_motion(g), o_hist). Extra goal interfaces can be registered later (plan Appendix B)."""
+    """a = dec(enc_i(g), o_hist), one encoder per goal interface (plan Appendix B).
+
+    "motion": g = K future reference frames. "velocity": g = (vx, vy, wz) command."""
 
     def __init__(self, cfg: PolicyCfg):
         super().__init__()
         self.cfg = cfg
         self.encoders = nn.ModuleDict({"motion": MotionEncoder(cfg)})
+        if cfg.velocity:
+            self.encoders["velocity"] = VelocityEncoder(cfg)
         self.decoder = Decoder(cfg)
 
+    def latent(self, obs_hist: torch.Tensor, goal: torch.Tensor, interface: str = "motion") -> torch.Tensor:
+        if interface == "velocity":
+            return self.encoders["velocity"](goal, obs_hist)
+        return self.encoders[interface](goal)
+
     def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, interface: str = "motion") -> torch.Tensor:
-        return self.decoder(self.encoders[interface](goal), obs_hist)
+        return self.decoder(self.latent(obs_hist, goal, interface), obs_hist)
+
+    def decode_frozen(self, z: torch.Tensor, obs_hist: torch.Tensor) -> torch.Tensor:
+        """Decoder with stop-gradient on its weights: gradients reach z (and its encoder), not the
+        decoder, which stays trained by motion tracking alone (Appendix B)."""
+        params = {k: v.detach() for k, v in self.decoder.named_parameters()}
+        params.update(dict(self.decoder.named_buffers()))
+        return torch.func.functional_call(self.decoder, params, (z, obs_hist))
 
 
 class Critic(nn.Module):
@@ -103,3 +136,15 @@ class Critic(nn.Module):
 
     def forward(self, feat: torch.Tensor, goal: torch.Tensor, xi_norm: torch.Tensor, e_root: torch.Tensor) -> torch.Tensor:
         return self.mlp(torch.cat([feat, goal * self.goal_scale, xi_norm, e_root], dim=-1)).squeeze(-1)
+
+
+class VelocityCritic(nn.Module):
+    """V_vel(canonical state 13+2NJ, normalized command 3, xi) -> scalar."""
+
+    def __init__(self, cfg: CriticCfg, pcfg: PolicyCfg, xi_dim: int):
+        super().__init__()
+        self.mlp = MLP(state_dim(pcfg.num_joints) + 3 + xi_dim, cfg.hidden, 1)
+        self.register_buffer("cmd_scale", 1.0 / torch.tensor(pcfg.cmd_scale, dtype=torch.float32))
+
+    def forward(self, feat: torch.Tensor, cmd: torch.Tensor, xi_norm: torch.Tensor) -> torch.Tensor:
+        return self.mlp(torch.cat([feat, cmd * self.cmd_scale, xi_norm], dim=-1)).squeeze(-1)

@@ -7,6 +7,9 @@ functions work unchanged, plus:
 * ``goal``        (N, K*(2NJ+10)) future-frame goal features (plan D5)
 * ``root_*``      reference pelvis quantities for the paper's root terminations
 * ``clip_end``    (N,) True once the clip's last frame has been reached (time-out)
+* ``track_mask``  (N,) envs that track the reference (default all). The others (velocity
+                  interface) keep a reference frame for reset states and reference commands
+                  only: they start uniformly in the library and stay out of the sampler statistics
 * return-based reset sampling over 1 s bins of the whole library (plan D14)
 """
 
@@ -63,6 +66,8 @@ class MultiClipMotionCommand(CommandTerm):
         n = self.num_envs
         self.frame = torch.zeros(n, dtype=torch.long, device=self.device)
         self.clip_end = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self.track_mask = torch.ones(n, dtype=torch.bool, device=self.device)
+        self.untracked_frames: torch.Tensor | None = None  # reset frames for untracked envs (None: all)
         self._refresh_ref()
         self.body_pos_relative_w = torch.zeros(n, len(cfg.body_names), 3, device=self.device)
         self.body_quat_relative_w = torch.zeros(n, len(cfg.body_names), 4, device=self.device)
@@ -198,7 +203,8 @@ class MultiClipMotionCommand(CommandTerm):
         reward = getattr(self._env, "reward_buf", None)
         if reward is None:
             return
-        ids = torch.arange(self.num_envs, device=self.device) if env_mask is None else env_mask.nonzero().squeeze(-1)
+        mask = self.track_mask if env_mask is None else env_mask & self.track_mask
+        ids = mask.nonzero().squeeze(-1)
         if ids.numel() == 0:
             return
         pos = self.ep_len[ids].clamp_max(self.max_ep_steps - 1)
@@ -260,17 +266,18 @@ class MultiClipMotionCommand(CommandTerm):
 
     # ------------------------------------------------------------------ sampling
 
-    def _sample_frames(self, n: int) -> torch.Tensor:
+    def _sample_frames(self, n: int, mode: str | None = None) -> torch.Tensor:
         lib = self.library
         cfg = self.cfg
-        if cfg.sampling_mode == "start":
+        mode = mode or cfg.sampling_mode
+        if mode == "start":
             clips = torch.randint(0, lib.num_clips, (n,), device=self.device)
             return lib.clip_start[clips]
-        if cfg.sampling_mode == "uniform":
+        if mode == "uniform":
             # Uniform over frames (long clips get proportionally more starts), leaving >= 2 steps.
             f = torch.randint(0, lib.num_frames, (n,), device=self.device)
             return torch.minimum(f, lib.last_frame_of(f) - 2).clamp_min(0)
-        assert cfg.sampling_mode == "return"
+        assert mode == "return"
         hard = torch.softmax(-cfg.softmax_temp * self.bin_return / cfg.g_max, dim=0)
         self.bin_memory = (1 - cfg.memory_alpha) * self.bin_memory + cfg.memory_alpha * hard
         p = (
@@ -299,12 +306,21 @@ class MultiClipMotionCommand(CommandTerm):
         # Episode bookkeeping for the envs being reset (terminal reward is already in reward_buf).
         mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         mask[env_ids] = True
-        if self.ep_len.sum() > 0 or hasattr(self._env, "reward_buf"):
+        tracked = env_ids[self.track_mask[env_ids]]
+        if tracked.numel() > 0 and (self.ep_len.sum() > 0 or hasattr(self._env, "reward_buf")):
             self._log_step_rewards(mask)
-            self._finalize_episodes(env_ids)
+            self._finalize_episodes(tracked)
         self.ep_len[env_ids] = 0
 
         sampled = self._sample_frames(len(env_ids))
+        untracked = ~self.track_mask[env_ids]
+        if untracked.any() and self.cfg.sampling_mode != "start":
+            k = int(untracked.sum())
+            if self.untracked_frames is None:
+                sampled[untracked] = self._sample_frames(k, "uniform")
+            else:
+                pool = self.untracked_frames
+                sampled[untracked] = pool[torch.randint(0, pool.numel(), (k,), device=self.device)]
         forced = self.forced_frame[env_ids]
         self.frame[env_ids] = torch.where(forced >= 0, forced, sampled)
         self.clip_end[env_ids] = False

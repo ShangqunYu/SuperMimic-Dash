@@ -172,6 +172,25 @@ G1 regression tests run.
   and that clip's precomputed goal features; mjlab_dash interface (obs, time_step -> actions
   + reference). Three clips exported from `dash_e2_hwdr` (idle, forward walk, slow turn),
   attached to the GitHub release `dash_e2_hwdr`. **Deployment handoff: `docs/DEPLOYMENT.md`.**
+- **Velocity interface** (2026-10-30, `--velocity.enabled`, paper Appendix B/G; code in
+  `interfaces/velocity.py`, `imagination/rollout.py:imagine_velocity`, `policy/nets.py`):
+  - Command (vx, vy) m/s in the heading frame + wz world yaw rate. New `VelocityEncoder` (cmd +
+    the 600-d obs history -> 32-d latent, MLP 256x256), shared decoder run with **frozen weights**
+    for velocity rollouts (`Policy.decode_frozen`), own `VelocityCritic`, latent alignment MSE
+    (weight 0.1) to `enc_motion(goal).detach()` on reference-command rollouts.
+  - Sim: the last half of the envs (`track_mask` False on the motion command) follow commands:
+    fall-only termination (torso < 0.30 m or 1+u_z > 0.7; Dash stands at 0.67 m), no clip-end
+    time-out, reset to upright library frames, excluded from the reset-sampler statistics and from
+    the world model's termination-head loss. Commands: 50% the reference clip's (25-frame centred
+    mean, read each step), else held uniform (10% zero), resampled every 250 steps.
+  - Imagination: each batch is half motion, half velocity. Reference-command velocity rollouts start
+    in *tracking* envs (robot in phase with the clip, so the alignment target matches its state);
+    uniform-command rollouts start in velocity envs. Fall termination is analytic (sigmoid logits).
+  - Dash command ranges (uniform): vx (-0.8, 1.5), vy (-0.6, 0.6), wz (-1.8, 1.8), inside the
+    1-99% of the library's reference commands (vx -0.85..1.71, vy +-0.77, wz +-1.86).
+  - Warm start: `--init-from <ckpt>` loads world model, policy (velocity encoder new), critic and
+    sampler state. Export: `scripts/export_onnx.py --interface velocity` (obs + command -> actions)
+    with a closed-loop step test. Tests: `tests/test_velocity.py`.
 - The lab server is shared: other users' jobs can take both GPUs (seen 2026-10-28),
   which slowed `dash_e1_sim` from 3.6 to 2.6 it/s after ~60k.
 

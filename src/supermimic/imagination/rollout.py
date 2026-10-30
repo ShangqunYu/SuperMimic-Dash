@@ -133,3 +133,85 @@ def imagine(
         frames=torch.stack(frames),
         reward_terms={k: float(v / horizon) for k, v in zip(REWARD_TERM_NAMES, term_sum.tolist())},
     )
+
+
+@dataclass
+class VelRollout:
+    states: torch.Tensor  # (H+1, n, 13+2NJ)
+    actions: torch.Tensor  # (H, n, NJ)
+    rewards: torch.Tensor  # (H, n)
+    dhat: torch.Tensor  # (H+1, n)
+    survival: torch.Tensor  # (H+1, n)
+    cmds: torch.Tensor  # (H+1, n, 3) command in force at each state
+    align_loss: torch.Tensor  # scalar: latent alignment MSE on reference-command samples (0 if none)
+    reward_terms: dict
+
+
+def imagine_velocity(
+    wm: WorldModel,
+    policy: Policy,
+    lib: MotionLibrary,
+    start: StartBatch,
+    cmd0: torch.Tensor,
+    from_ref: torch.Tensor,
+    ref_cmd: torch.Tensor,
+    horizon: int,
+    step_fn,
+    future_frames: int = 10,
+    obs_noise: bool = True,
+) -> VelRollout:
+    """Velocity-interface rollout (Appendix B/G). The decoder runs with frozen weights, so the return
+    gradient reaches only the velocity encoder. Samples with ``from_ref`` read their command from the
+    reference clip every step and also get the latent alignment target enc_motion(goal) (no gradient)."""
+    from supermimic.interfaces.velocity import VELOCITY_TERM_NAMES
+
+    device = start.state.device
+    n = start.state.shape[0]
+    q0 = lib.default_joint_pos
+    noise_half = obs_noise_half(wm.num_joints).to(device)
+
+    def add_noise(o):
+        return o + (torch.rand_like(o) * 2 - 1) * noise_half if obs_noise else o
+
+    hist = [add_noise(analytic_observation(start.hist_states[i], start.hist_actions[i], start.xi, q0)) for i in range(start.hist_states.shape[0])]
+    s, a_prev = start.state, start.prev_action
+    last = lib.last_frame_of(start.frame)
+    frames_all = torch.minimum(start.frame[None, :] + torch.arange(horizon + 1, device=device)[:, None], last[None, :])
+    ref_ids = from_ref.nonzero().squeeze(-1)
+    cmd = torch.where(from_ref[:, None], ref_cmd[frames_all[0]], cmd0)
+    c = torch.ones(n, device=device)
+    states, actions, rewards = [s], [], []
+    dhats, survivals, cmds = [torch.zeros(n, device=device)], [c], [cmd]
+    align = torch.zeros((), device=device)
+    term_sum = torch.zeros(len(VELOCITY_TERM_NAMES), device=device)
+    for t in range(horizon):
+        obs_flat = flatten_history_term_major(torch.stack(hist, 0))
+        z = policy.encoders["velocity"](cmd, obs_flat)
+        if ref_ids.numel() > 0:
+            with torch.no_grad():
+                z_ref = policy.encoders["motion"](lib.goal_window(frames_all[t, ref_ids], future_frames))
+            align = align + ((z[ref_ids] - z_ref) ** 2).mean()
+        a = policy.decode_frozen(z, obs_flat)
+        s_next, r, term_vec, logits, obs_clean = step_fn(s, a, a_prev, start.xi, cmd)
+        d = torch.sigmoid(logits)
+        c = c * (1.0 - d)
+        term_sum += term_vec.detach().mean(-1)
+        hist = hist[1:] + [add_noise(obs_clean)]
+        a_prev, s = a, s_next
+        cmd = torch.where(from_ref[:, None], ref_cmd[frames_all[t + 1]], cmd)
+        states.append(s)
+        actions.append(a)
+        rewards.append(r)
+        dhats.append(d)
+        survivals.append(c)
+        cmds.append(cmd)
+    return VelRollout(
+        states=torch.stack(states),
+        actions=torch.stack(actions),
+        rewards=torch.stack(rewards),
+        dhat=torch.stack(dhats),
+        survival=torch.stack(survivals),
+        cmds=torch.stack(cmds),
+        align_loss=align / horizon,
+        reward_terms={k: float(v / horizon) for k, v in zip(VELOCITY_TERM_NAMES, term_sum.tolist())},
+    )

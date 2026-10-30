@@ -49,3 +49,29 @@ class ImagStep:
 
     def __call__(self, s, a, a_prev, xi, ref: ReferenceFrame):
         return self._fn(s, a, a_prev, xi, ref.body_pos_w, ref.body_quat_w, ref.body_lin_vel_w, ref.body_ang_vel_w, ref.root_pos_w, ref.root_quat_w)
+
+
+class VelStep:
+    """One imagined step of the velocity interface: dynamics, Table A.6 reward, analytic fall logits."""
+
+    def __init__(self, wm: WorldModel, default_joint_pos: torch.Tensor, vcfg, compile_mode: str | None = None):
+        self.wm = wm
+        self.q0 = default_joint_pos
+        self.vcfg = vcfg
+        self._fn = self._step
+        if compile_mode:
+            mode = None if compile_mode == "default" else compile_mode
+            self._fn = torch.compile(self._step, mode=mode, dynamic=False)
+
+    def _step(self, s, a, a_prev, xi, cmd):
+        from supermimic.interfaces.velocity import VELOCITY_TERM_NAMES, fall_logits, velocity_reward_terms
+
+        s_next = self.wm.step(s, a, xi)
+        terms = velocity_reward_terms(s_next, a, a_prev, cmd, self.wm.heads.soft_limits, self.vcfg)
+        term_vec = torch.stack([terms[k] for k in VELOCITY_TERM_NAMES], dim=0)
+        logits = fall_logits(s_next, self.vcfg)
+        obs_clean = analytic_observation(s_next, a, xi, self.q0)
+        return s_next, terms["total"], term_vec, logits, obs_clean
+
+    def __call__(self, s, a, a_prev, xi, cmd):
+        return self._fn(s, a, a_prev, xi, cmd)

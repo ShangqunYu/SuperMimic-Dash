@@ -1,4 +1,14 @@
-"""Export a SuperMimic policy to ONNX for deployment, one file per motion clip.
+"""Export a SuperMimic policy to ONNX for deployment: one file per motion clip, or one velocity-command policy.
+
+--interface velocity (checkpoints trained with --velocity.enabled):
+
+  inputs : obs (1, obs_dim)    same proprioceptive history as below
+           command (1, 3)      (vx, vy) m/s in the heading frame, wz rad/s (world yaw rate), raw units
+  outputs: actions (1, NJ)     as below
+
+  uv run --with onnxruntime python scripts/export_onnx.py --interface velocity --ckpt logs/<run>/ckpt_latest.pt
+
+--interface motion (default):
 
 Same interface as mjlab_dash's tracking export (MotionTrackingOnPolicyRunner):
 
@@ -56,6 +66,18 @@ class OnnxMotionPolicy(nn.Module):
         )
 
 
+class OnnxVelocityPolicy(nn.Module):
+    def __init__(self, policy: nn.Module):
+        super().__init__()
+        self.policy = policy
+
+    def forward(self, obs: torch.Tensor, command: torch.Tensor):
+        return self.policy(obs, command, "velocity")
+
+
+# Step-test commands for the velocity export check (vx, vy, wz).
+CHECK_COMMANDS = [(0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (1.0, 0.0, 0.0), (-0.5, 0.0, 0.0), (0.0, 0.4, 0.0), (0.0, 0.0, 1.0), (0.6, 0.0, 0.8)]
+
 OUTPUTS = ["actions", "joint_pos", "joint_vel", "body_pos_w", "body_quat_w", "body_lin_vel_w", "body_ang_vel_w"]
 
 
@@ -101,14 +123,86 @@ def metadata(env, ckpt: Path, clip: str, frames: int, cfg: dict) -> dict:
 
 
 @torch.no_grad()
+def export_velocity(ckpt: Path, npz_dir: Path, out_dir: Path, check_steps: int, start_clip: str = "dash_idle_loop_003__A265") -> None:
+    """Export obs + command -> actions and run a closed-loop step test in simulation (no DR, no noise)."""
+    from supermimic.interfaces.velocity import velocity_of
+
+    policy, cfg = load_policy_from_checkpoint(ckpt, "cuda:0")
+    assert cfg["policy"].get("velocity"), "checkpoint has no velocity encoder"
+    n = len(CHECK_COMMANDS)
+    v = cfg["velocity"]
+    env = make_env(
+        SuperMimicEnvCfgArgs(
+            npz_files=[str(npz_dir / f"{start_clip}.npz")], robot=cfg.get("robot", "g1"), num_envs=n, future_frames=cfg["env"]["future_frames"],
+            episode_length_s=1.0e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
+            sampling_mode="start", record_transitions=True, replay_capacity=4, seed=0, fall_height=v["fall_height"], fall_tilt=v["fall_tilt"],
+        ),
+        device="cuda:0",
+    )
+    try:
+        cmd = env.command_manager.get_term("motion")
+        cmd.track_mask[:] = False  # velocity envs: fall-only termination, no clip end
+        obs, _ = env.reset()
+        cpu_policy, _ = load_policy_from_checkpoint(ckpt, "cpu")
+        model = OnnxVelocityPolicy(cpu_policy).eval()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / "velocity.onnx"
+        torch.onnx.export(model, (torch.zeros(1, obs["policy"].shape[1]), torch.zeros(1, 3)), str(path), export_params=True,
+                          opset_version=18, input_names=["obs", "command"], output_names=["actions"], dynamic_axes={}, dynamo=False)
+        meta = metadata(env, ckpt, "velocity", 0, cfg)
+        for k in ("motion_name", "motion_frames", "anchor_body_name", "body_names", "future_frames"):
+            meta.pop(k)
+        meta.update(interface="velocity", command_names=["vx", "vy", "wz"], command_frame="vx, vy: m/s in the heading (yaw-only) frame; wz: rad/s world yaw rate",
+                    command_range_vx=list(v["vx_range"]), command_range_vy=list(v["vy_range"]), command_range_wz=list(v["wz_range"]))
+        m = onnx.load(str(path))
+        for k, val in meta.items():
+            m.metadata_props.append(onnx.StringStringEntryProto(key=k, value=_csv(val)))
+        onnx.save(m, str(path))
+        (out_dir / "velocity.json").write_text(json.dumps(meta, indent=1))
+        print(f"[export] {path}")
+
+        try:
+            import onnxruntime as ort
+        except ImportError:
+            print("[check] onnxruntime not installed; run with `uv run --with onnxruntime` to verify")
+            return
+        sess = ort.InferenceSession(str(path))
+        io = env.recorder_manager.get_term("replay").state_io
+        c = torch.tensor(CHECK_COMMANDS, device=env.device)
+        err, falls, achieved, k = 0.0, np.zeros(n, dtype=int), torch.zeros(n, 3, device=env.device), 0
+        for t in range(check_steps):
+            a_cpu = cpu_policy(obs["policy"].cpu(), c.cpu(), "velocity").numpy()
+            o = obs["policy"].cpu().numpy()
+            for i in range(n):
+                a = sess.run(["actions"], {"obs": o[i : i + 1], "command": c[i : i + 1].cpu().numpy()})[0]
+                err = max(err, float(np.abs(a - a_cpu[i : i + 1]).max()))
+            obs, _, term, _, _ = env.step(policy(obs["policy"], c, "velocity"))
+            falls += term.cpu().numpy()
+            if t >= check_steps - 100:  # last 2 s
+                achieved += velocity_of(io.read())
+                k += 1
+        achieved /= max(k, 1)
+        for i, cc in enumerate(CHECK_COMMANDS):
+            print(f"[check] cmd {cc}: achieved ({achieved[i, 0]:+.2f}, {achieved[i, 1]:+.2f}, {achieved[i, 2]:+.2f}) over the last 2 s, falls {falls[i]}")
+        print(f"[check] max |a_onnx - a_torch| = {err:.2e} over {check_steps} steps")
+        assert err < 1e-4, "ONNX output differs from the PyTorch policy"
+    finally:
+        env.close()
+
+
+@torch.no_grad()
 def main(
     ckpt: Path = Path("logs/dash_e2_hwdr/ckpt_latest.pt"),
+    interface: str = "motion",
     clips: list[str] = ["dash_idle_loop_003__A265", "dash_walk_forward_stop_002__A026", "dash_walk_ff_stop_360_R_slow_001__A445"],
     npz_dir: Path = Path("data/npz/dash_bones_seed"),
     out_dir: Path | None = None,
     check_steps: int = 300,
 ) -> None:
     out_dir = out_dir or ckpt.parent / "onnx"
+    if interface == "velocity":
+        return export_velocity(ckpt, npz_dir, out_dir, check_steps)
+    assert interface == "motion", interface
     out_dir.mkdir(parents=True, exist_ok=True)
     policy, cfg = load_policy_from_checkpoint(ckpt, "cuda:0")
     files = [str(npz_dir / f"{c}.npz") for c in clips]

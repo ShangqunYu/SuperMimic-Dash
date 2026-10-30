@@ -13,9 +13,10 @@ from torch.utils.tensorboard import SummaryWriter
 from supermimic.config import TrainConfig
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
-from supermimic.imagination.policy_trainer import PolicyTrainer
+from supermimic.imagination.policy_trainer import PolicyTrainer, VelocityImagination
+from supermimic.interfaces.velocity import CommandSampler, fall_features, reference_commands, velocity_of, velocity_reward_terms
 from supermimic.kinematics.fk import Kinematics
-from supermimic.policy.nets import Critic, Policy
+from supermimic.policy.nets import Critic, Policy, VelocityCritic
 from supermimic.robots import get_robot
 from supermimic.training.distributed import allreduce_mean, broadcast_params, finalize, init_distributed, world_size
 from supermimic.training.schedule import cosine_lr
@@ -33,6 +34,11 @@ class Trainer:
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
         # With hardware DR, its parameters (per joint and per body) enter xi (envs/sim_context.py).
         cfg.world_model.state_spec.xi_hw_bodies = spec.num_bodies if cfg.env.hardware_dr else 0
+        vcfg = cfg.velocity
+        cfg.policy.velocity = vcfg.enabled
+        cfg.policy.cmd_scale = vcfg.cmd_scale
+        if vcfg.enabled:
+            assert not cfg.env.anchor_obs, "velocity interface needs a proprioception-only policy"
         self.rank, local_rank, self.world = init_distributed()
         self.is_main = self.rank == 0
         if self.world > 1:
@@ -73,6 +79,8 @@ class Trainer:
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,
+                fall_height=vcfg.fall_height,
+                fall_tilt=vcfg.fall_tilt,
                 seed=cfg.seed + 1000 * self.rank,
             ),
             device=self.device,
@@ -93,7 +101,34 @@ class Trainer:
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)
-        self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
+
+        # Velocity interface: the last env_fraction of the envs follow velocity commands.
+        self.vel = None
+        if vcfg.enabled:
+            n = env.num_envs
+            vel_mask = torch.arange(n, device=self.device) >= n - int(round(n * vcfg.env_fraction))
+            self.command.track_mask[vel_mask] = False
+            self.vel_mask, self.vel_ids = vel_mask, vel_mask.nonzero().squeeze(-1)
+            self.ref_cmd = reference_commands(self.lib, vcfg.ref_window)
+            # Velocity envs start in upright library frames (root high, small tilt).
+            up = []
+            for i in range(0, self.lib.num_frames, 1 << 22):
+                f = torch.arange(i, min(i + (1 << 22), self.lib.num_frames), device=self.device)
+                st = self.lib.ref_state(f)
+                feats = fall_features(st)
+                up.append(f[(feats[:, 0] > vcfg.fall_height + 0.25) & (feats[:, 1] < 0.3)])
+            self.command.untracked_frames = torch.cat(up)
+            self.vel_sampler = CommandSampler(len(self.vel_ids), self.ref_cmd, vcfg, self.device)
+            self.vel_critic = VelocityCritic(cfg.critic, cfg.policy, self.wm.spec.xi_dim).to(self.device)
+            broadcast_params(self.vel_critic)
+            self.vel = VelocityImagination(vcfg, self.vel_critic, self.ref_cmd, self.command.track_mask, CommandSampler(1, self.ref_cmd, vcfg, self.device))
+            self.wm_trainer.track_mask = self.command.track_mask
+            self.vel_ep_sum = torch.zeros(len(self.vel_ids), device=self.device)
+            self.vel_ep_len = torch.zeros(len(self.vel_ids), device=self.device)
+            self.prev_action = torch.zeros(n, spec.num_joints, device=self.device)
+            if self.is_main:
+                print(f"[INFO] velocity interface: {len(self.vel_ids)} envs, {self.command.untracked_frames.numel()} upright reset frames, cmd ranges vx {vcfg.vx_range} vy {vcfg.vy_range} wz {vcfg.wz_range}")
+        self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer, velocity=self.vel)
         n_params = lambda m: sum(p.numel() for p in m.parameters())  # noqa: E731
         if self.is_main:
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
@@ -108,6 +143,8 @@ class Trainer:
         self._utd_acc = 0.0
         if cfg.resume is not None:
             self.load(cfg.resume)
+        elif cfg.init_from is not None:
+            self.init_from(cfg.init_from)
 
     # ------------------------------------------------------------------ checkpoints
 
@@ -127,6 +164,7 @@ class Trainer:
                 "bin_return": self.command.bin_return,
                 "bin_memory": self.command.bin_memory,
                 "config": asdict(self.cfg),
+                **({"vel_critic": self.vel_critic.state_dict(), "vel_critic_opt": self.policy_trainer.vel_critic_opt.state_dict()} if self.vel is not None else {}),
             },
             self.log_dir / name,
         )
@@ -143,22 +181,79 @@ class Trainer:
         self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
         self.command.bin_return.copy_(ck["bin_return"])
         self.command.bin_memory.copy_(ck["bin_memory"])
+        if self.vel is not None:
+            self.vel_critic.load_state_dict(ck["vel_critic"])
+            self.policy_trainer.vel_critic_opt.load_state_dict(ck["vel_critic_opt"])
         self.iteration = ck["iteration"]
         self.start_iteration = self.iteration
         self.num_updates = ck["num_updates"]
         print(f"[INFO] resumed from {path} at iteration {self.iteration}")
 
+    def init_from(self, path: Path) -> None:
+        ck = torch.load(path, map_location=self.device, weights_only=False)
+        ck_robot = ck["config"].get("robot", "g1")
+        assert ck_robot == self.robot.name, f"checkpoint is for {ck_robot}, run is for {self.robot.name}"
+        self.wm.load_state_dict(ck["wm"])
+        missing, unexpected = self.policy.load_state_dict(ck["policy"], strict=False)
+        assert not unexpected and all(k.startswith("encoders.velocity.") for k in missing), (missing, unexpected)
+        self.critic.load_state_dict(ck["critic"])
+        self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
+        self.command.bin_return.copy_(ck["bin_return"])
+        self.command.bin_memory.copy_(ck["bin_memory"])
+        for m in (self.wm, self.policy, self.critic):
+            broadcast_params(m)
+        if self.is_main:
+            print(f"[INFO] initialized from {path} (iteration {ck['iteration']}); new: {sorted({'.'.join(k.split('.')[:2]) for k in missing})}")
+
     # ------------------------------------------------------------------ main loop
 
     @torch.no_grad()
     def act(self, obs) -> torch.Tensor:
-        return self.policy(obs["policy"], obs["goal"])
+        if self.vel is None:
+            return self.policy(obs["policy"], obs["goal"])
+        o = obs["policy"]
+        a = self.policy(o, obs["goal"])
+        a[self.vel_ids] = self.policy(o[self.vel_ids], self.vel_sampler.cmd, "velocity")
+        return a
+
+    @torch.no_grad()
+    def _velocity_after_step(self, action: torch.Tensor, done: torch.Tensor) -> list[float]:
+        """Velocity reward of the step just taken (envs that did not reset), episode bookkeeping and
+        command updates. Returns normalized returns of finished velocity episodes."""
+        ids, vcfg = self.vel_ids, self.cfg.velocity
+        s = self.recorder.state_io.read()[ids]
+        d = done[ids]
+        r = velocity_reward_terms(s, action[ids], self.prev_action[ids], self.vel_sampler.cmd, self.wm.heads.soft_limits, vcfg)
+        live = ~d
+        self.vel_ep_sum += torch.where(live, r["total"], torch.zeros_like(r["total"]))
+        self.vel_ep_len += live.float()
+        err = velocity_of(s) - self.vel_sampler.cmd
+        self._vel_stats["lin_err"] += float((err[:, 0:2].norm(dim=-1) * live).sum())
+        self._vel_stats["yaw_err"] += float((err[:, 2].abs() * live).sum())
+        self._vel_stats["n"] += int(live.sum())
+        out = []
+        if d.any():
+            j = d.nonzero().squeeze(-1)
+            out = (self.vel_ep_sum[j] / (vcfg.max_step_reward * self.vel_ep_len[j].clamp_min(1))).tolist()
+            self._vel_stats["falls"] += int(self.env.termination_manager.terminated[ids[j]].sum())
+            self._vel_stats["episodes"] += int(j.numel())
+            self.vel_ep_sum[j] = 0.0
+            self.vel_ep_len[j] = 0.0
+            self.vel_sampler.resample(j, self.command.frame[ids[j]])
+        self.prev_action.copy_(action)
+        self.prev_action[done] = 0.0
+        self.vel_sampler.step(self.command.frame[ids], clip_over=self.command.clip_end[ids])
+        return out
 
     def run(self) -> None:
         cfg = self.cfg
         sch = cfg.schedule
         env = self.env
         obs, _ = env.reset()
+        if self.vel is not None:
+            self.vel_sampler.resample(torch.arange(len(self.vel_ids), device=self.device), self.command.frame[self.vel_ids])
+            self._vel_stats = {"lin_err": 0.0, "yaw_err": 0.0, "n": 0, "falls": 0, "episodes": 0}
+            vel_returns: list[float] = []
         t_start = time.time()
         timers = {"sim": 0.0, "wm": 0.0, "policy": 0.0}
         agg: dict[str, float] = {}
@@ -175,8 +270,11 @@ class Trainer:
             self.ep_reward_sum += rew
             self.ep_len += 1
             done = term | tout
-            if done.any():
-                ids = done.nonzero().squeeze(-1)
+            if self.vel is not None:
+                vel_returns.extend(self._velocity_after_step(action, done))
+            track_done = done if self.vel is None else done & ~self.vel_mask
+            if track_done.any():
+                ids = track_done.nonzero().squeeze(-1)
                 lens = self.ep_len[ids]
                 norm_ret = self.ep_reward_sum[ids] / (self.max_step_reward * lens.clamp_min(1))
                 finished_returns.extend(norm_ret.tolist())
@@ -253,6 +351,15 @@ class Trainer:
                     self.writer.add_scalar("time/updates", self.num_updates, it)
                     self.writer.add_scalar("sampler/entropy", float(self.command.metrics["sampling_entropy"][0]), it)
                     self.writer.add_scalar("sampler/bin_return_mean", float(self.command.bin_return.mean()), it)
+                    if self.vel is not None:
+                        vs = self._vel_stats
+                        if vel_returns:
+                            self.writer.add_scalar("train/vel_episode_norm_return", sum(vel_returns) / len(vel_returns), it)
+                        if vs["n"]:
+                            self.writer.add_scalar("train/vel_lin_err", vs["lin_err"] / vs["n"], it)
+                            self.writer.add_scalar("train/vel_yaw_err", vs["yaw_err"] / vs["n"], it)
+                        if vs["episodes"]:
+                            self.writer.add_scalar("train/vel_fall_rate", vs["falls"] / vs["episodes"], it)
                     dt_log = time.time() - last_log
                     last_log = time.time()
                     msg = (
@@ -262,10 +369,22 @@ class Trainer:
                         f"imag_ret {agg.get('policy/imag_return_undisc', float('nan'))/max(agg_n,1):.3f} surv {agg.get('policy/imag_survival_H', float('nan'))/max(agg_n,1):.3f} | "
                         f"t sim/wm/pi {timers['sim']:.1f}/{timers['wm']:.1f}/{timers['policy']:.1f}s"
                     )
+                    if self.vel is not None:
+                        vs = self._vel_stats
+                        msg += (
+                            f" | vel ret {sum(vel_returns) / max(len(vel_returns), 1):.3f} (n={len(vel_returns)}) "
+                            f"err {vs['lin_err'] / max(vs['n'], 1):.2f} m/s {vs['yaw_err'] / max(vs['n'], 1):.2f} rad/s falls {vs['falls']}/{vs['episodes']} "
+                            f"imag {agg.get('policy/vel_imag_return_undisc', float('nan'))/max(agg_n,1):.3f} "
+                            f"surv {agg.get('policy/vel_imag_survival_H', float('nan'))/max(agg_n,1):.3f} "
+                            f"align {agg.get('policy/vel_align_loss', float('nan'))/max(agg_n,1):.3f}"
+                        )
                     print(msg, flush=True)
                 agg, agg_n = {}, 0
                 finished_returns, finished_lens = [], []
                 timers = {k: 0.0 for k in timers}
+                if self.vel is not None:
+                    vel_returns = []
+                    self._vel_stats = {"lin_err": 0.0, "yaw_err": 0.0, "n": 0, "falls": 0, "episodes": 0}
             if self.iteration % sch.checkpoint_interval == 0:
                 self.save("ckpt_latest.pt")
                 self.save(f"ckpt_{self.iteration:07d}.pt")

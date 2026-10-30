@@ -71,6 +71,9 @@ class SuperMimicEnvCfgArgs:
     seed: int | None = 0
     root_height_threshold: float = 0.25
     root_tilt_threshold: float = 0.8
+    # Fall termination of velocity-interface envs (inactive while every env tracks the reference).
+    fall_height: float = 0.30
+    fall_tilt: float = 0.7
     joint_limit_weight: float = -2.0
     bin_frames: int = 50
     compact_library: bool = False
@@ -212,6 +215,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         "clip_end": TerminationTermCfg(func=sm_term.clip_end, params={"command_name": "motion"}, time_out=True),
         "root_height": TerminationTermCfg(func=sm_term.bad_root_height, params={"command_name": "motion", "threshold": a.root_height_threshold}),
         "root_tilt": TerminationTermCfg(func=sm_term.bad_root_tilt, params={"command_name": "motion", "threshold": a.root_tilt_threshold}),
+        "fall": TerminationTermCfg(func=sm_term.fall, params={"command_name": "motion", "height": a.fall_height, "tilt": a.fall_tilt}),
     }
 
     recorders = {}

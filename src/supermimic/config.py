@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from supermimic.imagination.policy_trainer import PolicyTrainerCfg
+from supermimic.interfaces.velocity import VelocityCfg
 from supermimic.policy.nets import CriticCfg, PolicyCfg
 from supermimic.world_model.wm_trainer import WMTrainerCfg
 from supermimic.world_model.world_model import WorldModelCfg
@@ -65,4 +66,8 @@ class TrainConfig:
     critic: CriticCfg = field(default_factory=CriticCfg)
     policy_trainer: PolicyTrainerCfg = field(default_factory=PolicyTrainerCfg)
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
+    velocity: VelocityCfg = field(default_factory=VelocityCfg)
     resume: Path | None = None
+    # Warm start: load world model, policy (missing encoders stay new), motion critic and sampler
+    # statistics from a checkpoint; optimizers and the iteration count start fresh.
+    init_from: Path | None = None

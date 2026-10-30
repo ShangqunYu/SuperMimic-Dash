@@ -75,12 +75,13 @@ class WorldModel(nn.Module):
     def enable_compile(self, mode: str | None = "default") -> None:
         self._loss_step_fn = torch.compile(self._loss_step, mode=None if mode == "default" else mode, dynamic=False) if mode else self._loss_step
 
-    def window_loss(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor, done: torch.Tensor, refs: list[ReferenceFrame]):
+    def window_loss(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor, done: torch.Tensor, refs: list[ReferenceFrame], term_weight: torch.Tensor | None = None):
         """k-step autoregressive loss.
 
         states: (k+1, n, 13+2NJ) logged states; a_exec: (k, n, NJ); xi: (n, 4+NJ);
         done: (k, n) termination label of states 1..k; refs[j]: reference of transition j (for the
-        termination features of state j+1).
+        termination features of state j+1). term_weight (n,): weight of each window in the
+        termination loss (0 for velocity-interface envs, whose falls are not reference-relative).
         """
         k = a_exec.shape[0]
         s = states[0]
@@ -94,7 +95,7 @@ class WorldModel(nn.Module):
         for j in range(k):
             s, sq, bce, logits = step_fn(s, a_exec[j], xi, states[j + 1], done[j], refs[j].root_pos_w, refs[j].root_quat_w)
             total_state = total_state + sq.sum(-1).mean()
-            total_term = total_term + bce.mean()
+            total_term = total_term + (bce.mean() if term_weight is None else (bce * term_weight).sum() / term_weight.sum().clamp_min(1.0))
             with torch.no_grad():
                 nse = sq.mean(-1).mean()
                 if j == 0:

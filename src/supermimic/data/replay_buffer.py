@@ -24,6 +24,7 @@ class WindowBatch:
     reward: torch.Tensor  # (k, n)
     done: torch.Tensor  # (k, n) termination label of states 1..k
     frame: torch.Tensor  # (k, n) target frame of each transition
+    env: torch.Tensor  # (n,) env index of each window
 
 
 @dataclass
@@ -134,11 +135,17 @@ class ReplayBuffer:
             reward=self.r[ee[:-1], tt[:-1]],
             done=self.done[ee[1:], tt[1:]],
             frame=self.frame[ee[:-1], tt[:-1]],
+            env=e,
         )
 
     @torch.no_grad()
-    def sample_starts(self, n: int, hist: int) -> StartBatch:
+    def sample_starts(self, n: int, hist: int, env_mask: torch.Tensor | None = None, min_height: float | None = None) -> StartBatch:
+        """env_mask (E,): only these envs; min_height: only states with the root at least this high."""
         mask = self.valid & ~self.terminal
+        if env_mask is not None:
+            mask &= env_mask[:, None]
+        if min_height is not None:
+            mask &= self.s[..., 2] >= min_height
         t_idx = torch.arange(self.T, device=self.device)[None, :]
         dist_to_ptr = (self.ptr[:, None] - t_idx - 1) % self.T
         mask &= dist_to_ptr < self.T - hist - 1  # keep history rows from being overwritten underneath
