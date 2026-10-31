@@ -191,6 +191,26 @@ G1 regression tests run.
   - Warm start: `--init-from <ckpt>` loads world model, policy (velocity encoder new), critic and
     sampler state. Export: `scripts/export_onnx.py --interface velocity` (obs + command -> actions)
     with a closed-loop step test. Tests: `tests/test_velocity.py`.
+  - Run `dash_e3_vel` (warm start from e2, stopped at 46k): velocity error 0.11 m/s / 0.11 rad/s,
+    no falls, 1 m/s step test 0.99 m/s, **but the gait looks unnatural (both arms held up and
+    forward)**; the tracking train return also fell to < 0 from 22k (not benchmarked). Superseded
+    by the motion-matching planner below for RC control.
+- **Motion-matching planner for RC control** (2026-10-30, SONIC-style: a kinematic planner feeds
+  reference motion to the unchanged tracking policy `dash_e2_hwdr`; code
+  `src/supermimic/planner/motion_matching.py`, numpy only so it runs on the robot):
+  - The goal features hold no global position/yaw, so the planner only chooses mocap frames.
+  - Database `data/planner/dash_walk_mm.npz` (`scripts/planner/build_mm_db.py`): neutral
+    locomotion clips (walk/turn/idle/start/stop/arc/sideways/backward words only, no jog or styles),
+    clip and mirror both benchmarked >= 0.9 by e2, best 3 takes per motion: 730 clips, 1.94 h,
+    54 MB. Speed coverage (1-99%): vx -0.52..0.89, vy +-0.54, wz +-1.77.
+  - Runtime: spring trajectory from the command, search every 10 ticks (or at clip end) over
+    [future root traj 0.2/0.5/1.0 s, foot pos/vel, root vel], jump if better than continuing,
+    inertialized feature offsets (half-life 0.1 s). Python step 2 ms mean, ~21 ms on search ticks.
+  - Sim: `scripts/planner/sim_rc.py` (scripted RC segments + video): 34 s sequence, 0 falls,
+    commands followed within ~0.05 m/s except turn-in-place (1.2 commanded -> ~1.9 rad/s; the
+    turn-in-place clips turn fast). Natural arm swing.
+  - Export: `scripts/export_onnx.py --interface goal` -> `goal.onnx` (obs (1,600) + goal (1,460)
+    -> actions), checked closed loop with the planner (3e-6). Tests: `tests/test_planner.py`.
 - The lab server is shared: other users' jobs can take both GPUs (seen 2026-10-28),
   which slowed `dash_e1_sim` from 3.6 to 2.6 it/s after ~60k.
 

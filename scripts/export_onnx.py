@@ -66,6 +66,17 @@ class OnnxMotionPolicy(nn.Module):
         )
 
 
+class OnnxGoalPolicy(nn.Module):
+    """Streaming tracking: the caller (e.g. the motion-matching planner) supplies the goal window."""
+
+    def __init__(self, policy: nn.Module):
+        super().__init__()
+        self.policy = policy
+
+    def forward(self, obs: torch.Tensor, goal: torch.Tensor):
+        return self.policy(obs, goal)
+
+
 class OnnxVelocityPolicy(nn.Module):
     def __init__(self, policy: nn.Module):
         super().__init__()
@@ -191,6 +202,65 @@ def export_velocity(ckpt: Path, npz_dir: Path, out_dir: Path, check_steps: int, 
 
 
 @torch.no_grad()
+@torch.no_grad()
+def export_goal(ckpt: Path, npz_dir: Path, out_dir: Path, check_steps: int, planner_db: Path, start_clip: str = "dash_idle_loop_003__A265") -> None:
+    """Export obs + goal -> actions; check it closed loop in simulation driven by the motion-matching planner."""
+    from supermimic.planner.motion_matching import MotionDatabase, MotionMatcher
+
+    policy, cfg = load_policy_from_checkpoint(ckpt, "cuda:0")
+    assert not cfg["env"].get("anchor_obs", False), "goal interface needs a proprioception-only policy"
+    env = make_env(
+        SuperMimicEnvCfgArgs(
+            npz_files=[str(npz_dir / f"{start_clip}.npz")], robot=cfg.get("robot", "g1"), num_envs=1, future_frames=cfg["env"]["future_frames"],
+            episode_length_s=1.0e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
+            sampling_mode="start", record_transitions=False, seed=0,
+        ),
+        device="cuda:0",
+    )
+    try:
+        cmd = env.command_manager.get_term("motion")
+        cmd.track_mask[:] = False  # fall-only termination: the env's own reference is not used
+        obs, _ = env.reset()
+        goal_dim = obs["goal"].shape[1]
+        cpu_policy, _ = load_policy_from_checkpoint(ckpt, "cpu")
+        model = OnnxGoalPolicy(cpu_policy).eval()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / "goal.onnx"
+        torch.onnx.export(model, (torch.zeros(1, obs["policy"].shape[1]), torch.zeros(1, goal_dim)), str(path), export_params=True,
+                          opset_version=18, input_names=["obs", "goal"], output_names=["actions"], dynamic_axes={}, dynamo=False)
+        meta = metadata(env, ckpt, "goal", 0, cfg)
+        for k in ("motion_name", "motion_frames", "anchor_body_name", "body_names"):
+            meta.pop(k)
+        meta.update(interface="goal", goal_dim=goal_dim,
+                    goal_layout="future_frames x [joint_pos - default (NJ), joint_vel (NJ), projected_gravity (3), root ang vel body (3), root lin vel heading (3), root height (1)], current frame first")
+        m = onnx.load(str(path))
+        for k, val in meta.items():
+            m.metadata_props.append(onnx.StringStringEntryProto(key=k, value=_csv(val)))
+        onnx.save(m, str(path))
+        (out_dir / "goal.json").write_text(json.dumps(meta, indent=1))
+        print(f"[export] {path}")
+        try:
+            import onnxruntime as ort
+        except ImportError:
+            print("[check] onnxruntime not installed; run with `uv run --with onnxruntime` to verify")
+            return
+        sess = ort.InferenceSession(str(path))
+        mm = MotionMatcher(MotionDatabase(planner_db))
+        commands = [(0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (0.5, 0.0, 0.6), (0.0, 0.0, -0.8), (0.0, 0.0, 0.0)]
+        err, falls = 0.0, 0
+        for t in range(check_steps):
+            g = mm.step(commands[min(t * len(commands) // check_steps, len(commands) - 1)])[None]
+            o = obs["policy"].cpu().numpy()
+            a = sess.run(["actions"], {"obs": o, "goal": g})[0]
+            err = max(err, float(np.abs(a - cpu_policy(torch.as_tensor(o), torch.as_tensor(g)).numpy()).max()))
+            obs, _, term, _, _ = env.step(torch.as_tensor(a, device=env.device))  # the ONNX output drives the robot
+            falls += int(term.sum())
+        print(f"[check] planner-driven closed loop, {check_steps} steps: max |a_onnx - a_torch| = {err:.2e}, falls {falls}, planner jumps {mm.jumps}")
+        assert err < 1e-4, "ONNX output differs from the PyTorch policy"
+    finally:
+        env.close()
+
+
 def main(
     ckpt: Path = Path("logs/dash_e2_hwdr/ckpt_latest.pt"),
     interface: str = "motion",
@@ -198,10 +268,13 @@ def main(
     npz_dir: Path = Path("data/npz/dash_bones_seed"),
     out_dir: Path | None = None,
     check_steps: int = 300,
+    planner_db: Path = Path("data/planner/dash_walk_mm.npz"),
 ) -> None:
     out_dir = out_dir or ckpt.parent / "onnx"
     if interface == "velocity":
         return export_velocity(ckpt, npz_dir, out_dir, check_steps)
+    if interface == "goal":
+        return export_goal(ckpt, npz_dir, out_dir, check_steps, planner_db)
     assert interface == "motion", interface
     out_dir.mkdir(parents=True, exist_ok=True)
     policy, cfg = load_policy_from_checkpoint(ckpt, "cuda:0")
