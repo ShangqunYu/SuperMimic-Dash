@@ -51,7 +51,7 @@ def simulate(ckpt: Path, db_path: Path, segments: list[str], start_clip: str, cf
         db = MotionDatabase(db_path)
         mm = MotionMatcher(db, cfg)
         obs, _ = env.reset()
-        rec = {k: [] for k in ("q", "cmd", "act", "ref", "clip")}
+        rec = {k: [] for k in ("q", "cmd", "act", "ref", "clip", "jumps", "goal0")}
         falls, t_plan = 0, []
         for seg in segments:
             dur, *c = (float(x) for x in seg.split(":"))
@@ -68,6 +68,8 @@ def simulate(ckpt: Path, db_path: Path, segments: list[str], start_clip: str, cf
                 rec["act"].append(velocity_of(io.read())[0].cpu().numpy())
                 rec["ref"].append(mm.reference_velocity().copy())
                 rec["clip"].append(mm.clip_name)
+                rec["jumps"].append(mm.jumps)
+                rec["goal0"].append(goal[: db.goal.shape[1]])
         out = {k: (np.stack(v) if k != "clip" else v) for k, v in rec.items()}
         t_plan = np.array(t_plan) * 1e3
         print(f"falls {falls}, planner jumps {mm.jumps}, planner step ms: mean {t_plan.mean():.2f} p99 {np.percentile(t_plan, 99):.2f} max {t_plan.max():.2f}")
@@ -123,10 +125,12 @@ def main(
     out: Path = Path("logs/planner/rc_demo.mp4"),
     start_clip: str = "dash_idle_loop_003__A265",
     render_video: bool = True,
-) -> None:
-    rec = simulate(ckpt, db, segments, start_clip, PlannerCfg())
+    planner: PlannerCfg = PlannerCfg(),
+) -> dict:
+    rec = simulate(ckpt, db, segments, start_clip, planner)
     if render_video:
         render(rec, out)
+    return rec
 
 
 if __name__ == "__main__":

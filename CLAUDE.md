@@ -201,14 +201,23 @@ G1 regression tests run.
   - The goal features hold no global position/yaw, so the planner only chooses mocap frames.
   - Database `data/planner/dash_walk_mm.npz` (`scripts/planner/build_mm_db.py`): neutral
     locomotion clips (walk/turn/idle/start/stop/arc/sideways/backward words only, no jog or styles),
-    clip and mirror both benchmarked >= 0.9 by e2, best 3 takes per motion: 730 clips, 1.94 h,
-    54 MB. Speed coverage (1-99%): vx -0.52..0.89, vy +-0.54, wz +-1.77.
+    clip and mirror both benchmarked >= 0.9 by e2, best 3 takes per *numbered* motion
+    (walk_forward_loop_001 and _002 are separate motions): 2420 clips, 4.97 h, 150 MB. Speed
+    coverage (1-99%): vx -0.61..0.91, vy +-0.57, wz +-1.62. v1 (`_v1.npz`, 3 takes per motion
+    family, 730 clips) had too few straight-walking loops: during straight walking it hopped between
+    arc/turn clips every 0.2 s and the reference speed sagged once per step (the "hitch" the user saw).
+  - Matching features use a smoothed "simulation root" (25-frame centred mean of torso xy and
+    unwrapped yaw); the raw torso yaws with every step, which made straight walking look curved.
   - Runtime: spring trajectory from the command, search every 10 ticks (or at clip end) over
-    [future root traj 0.2/0.5/1.0 s, foot pos/vel, root vel], jump if better than continuing,
-    inertialized feature offsets (half-life 0.1 s). Python step 2 ms mean, ~21 ms on search ticks.
-  - Sim: `scripts/planner/sim_rc.py` (scripted RC segments + video): 34 s sequence, 0 falls,
-    commands followed within ~0.05 m/s except turn-in-place (1.2 commanded -> ~1.9 rad/s; the
-    turn-in-place clips turn fast). Natural arm swing.
+    [future root traj 0.2/0.5/1.0 s, foot pos/vel, root vel], jump only if the best cost is below
+    0.8 x the continuation cost - 0.02 (`jump_ratio`, `jump_margin`), inertialized feature offsets
+    (half-life 0.1 s). Exact KD-tree search (scipy cKDTree, brute-force fallback): step 0.4 ms mean,
+    6 ms p99, ~30 ms worst case, so run the search off the control loop on the robot.
+  - Sim (`scripts/planner/sim_rc.py`, 34 s scripted sequence, e2 policy): 0 falls; 0.5 s-mean robot
+    speed during steady 0.6 m/s walking min 0.62, std 0.039 (v1: 0.47, 0.056). Command errors: forward
+    0.6 -> 0.71 (database dominated by ~0.7 m/s natural pace), turn in place 1.2 -> 1.47 rad/s,
+    sideways/backward within 0.05. Heavier speed weights fix accuracy but bring back the hopping;
+    playback time-warping would be the clean fix (not done).
   - Export: `scripts/export_onnx.py --interface goal` -> `goal.onnx` (obs (1,600) + goal (1,460)
     -> actions), checked closed loop with the planner (3e-6). Tests: `tests/test_planner.py`.
 - The lab server is shared: other users' jobs can take both GPUs (seen 2026-10-28),

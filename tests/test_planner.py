@@ -41,13 +41,14 @@ def test_db_goal_features_match_env():
         win = lib.goal_window(f[:50], k).reshape(50, k, -1)
         for j in range(k):
             torch.testing.assert_close(win[:, j], goal[j : j + 50], atol=1e-5, rtol=1e-5)
-        # root_vel features: heading-frame planar velocity and world yaw rate of the reference
-        # (library rows hold world-frame angular velocity).
-        from supermimic.kinematics.rotations import quat_apply_inverse, yaw_quat
+        # root_vel features (smoothed simulation root) agree with the velocity interface's reference
+        # command (25-frame centred mean of the heading-frame velocity / world yaw rate) away from the clip ends.
+        from supermimic.interfaces.velocity import reference_commands
 
-        r = lib.ref(f)
-        torch.testing.assert_close(match[:, -3:-1], quat_apply_inverse(yaw_quat(r.root_quat_w), r.root_lin_vel_w)[:, :2], atol=1e-5, rtol=1e-5)
-        torch.testing.assert_close(match[:, -1], r.root_ang_vel_w[:, 2], atol=1e-5, rtol=1e-5)
+        ref_cmd = reference_commands(lib, window=25)[f]
+        inner = slice(30, -30)
+        torch.testing.assert_close(match[inner, -3:], ref_cmd[inner], atol=0.05, rtol=0.0)
+        assert ref_cmd[inner, 0].max() > 0.5  # the clip does walk
     finally:
         env.close()
 

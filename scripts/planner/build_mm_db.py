@@ -56,34 +56,58 @@ def select_clips(names, bench: dict, takes: int, min_return: float, jog: bool) -
         base = n[len("dash_") :].split("__")[0].lower()
         if not set(re.findall(r"[a-z]+", base)) <= allow or not (ok(n) and ok(n + "_M")):
             continue
-        groups[re.sub(r"_\d{3}$", "", base)].append(n)
+        groups[base].append(n)  # one group per numbered motion (walk_forward_loop_001, _002, ... are different motions)
     return [m for g in groups.values() for n in sorted(g, key=lambda n: -bench[n]["norm_return"])[:takes] for m in (n, n + "_M")]
 
 
+def smooth(x: torch.Tensor, window: int) -> torch.Tensor:
+    """Centred moving average along dim 0, edge-padded (clip ends hold their value)."""
+    h = window // 2
+    xp = torch.cat([x[:1].expand(h, *x.shape[1:]), x, x[-1:].expand(h, *x.shape[1:])])
+    c = torch.cat([torch.zeros_like(xp[:1]), xp.cumsum(0)])
+    return (c[window:] - c[:-window]) / window
+
+
 @torch.no_grad()
-def clip_features(ref: torch.Tensor, nj: int, q0: torch.Tensor, fk: Kinematics, feet: torch.Tensor):
-    """ref (T, 13+2NJ) -> goal (T,46), match (T,D) for one clip; trajectory offsets clamped at the clip end."""
+def clip_features(ref: torch.Tensor, nj: int, q0: torch.Tensor, fk: Kinematics, feet: torch.Tensor, root_window: int = 25):
+    """ref (T, 13+2NJ) -> goal (T,46), match (T,D) for one clip.
+
+    Matching features are measured from a smoothed "simulation root" (centred ``root_window``-frame
+    mean of the torso's planar position and unwrapped yaw): the torso sways and yaws within each
+    step, which would otherwise make straight walking look curved, alternately left and right.
+    Trajectory offsets are clamped at the clip end."""
     r = RefState(ref[:, 0:3], ref[:, 3:7], ref[:, 7 : 7 + nj], ref[:, 7 + nj : 10 + nj], ref[:, 10 + nj : 13 + nj], ref[:, 13 + nj :])
     goal = goal_features(r, q0)
     T = ref.shape[0]
-    yaw = heading_yaw(r.root_quat_w)
-    hq = yaw_quat(r.root_quat_w)
+    dt = 0.02
+    yaw_raw = heading_yaw(r.root_quat_w).double()
+    yaw_un = yaw_raw[0] + torch.cat([yaw_raw.new_zeros(1), torch.atan2(torch.sin(yaw_raw.diff()), torch.cos(yaw_raw.diff())).cumsum(0)])
+    yaw = smooth(yaw_un[:, None], root_window)[:, 0]
+    pos = smooth(r.root_pos_w[:, :2].double(), root_window)
+    c, s = torch.cos(yaw), torch.sin(yaw)
+
+    def to_heading(v):  # (T,2) world -> smoothed heading frame
+        return torch.stack([c * v[:, 0] + s * v[:, 1], -s * v[:, 0] + c * v[:, 1]], -1)
+
     traj_pos, traj_dir = [], []
     for o in TRAJ_OFFSETS:
         j = torch.clamp(torch.arange(T, device=ref.device) + o, max=T - 1)
-        d = r.root_pos_w[j] - r.root_pos_w
-        d[:, 2] = 0.0
-        traj_pos.append(quat_apply_inverse(hq, d)[:, :2])
+        traj_pos.append(to_heading(pos[j] - pos))
         dy = yaw[j] - yaw
         traj_dir.append(torch.stack([torch.cos(dy), torch.sin(dy)], -1))
     ang_b = quat_apply_inverse(r.root_quat_w, r.root_ang_vel_w)
     qvel = torch.cat([r.root_lin_vel_w, ang_b, r.joint_vel], -1)
     out = fk(torch.cat([r.root_pos_w, r.root_quat_w, r.joint_pos], -1), qvel)
-    hq_b = hq[:, None, :].expand(-1, len(feet), 4)
-    fpos = quat_apply_inverse(hq_b, out["pos"][:, feet] - r.root_pos_w[:, None, :]).reshape(T, -1)
-    fvel = quat_apply_inverse(hq_b, out["lin_vel"][:, feet]).reshape(T, -1)
-    lin_h = quat_apply_inverse(hq, r.root_lin_vel_w)[:, :2]
-    root_vel = torch.cat([lin_h, r.root_ang_vel_w[:, 2:3]], -1)
+    fpos = torch.stack([to_heading((out["pos"][:, k, :2] - pos.float()).double()) for k in feet.tolist()], 1)
+    fz = out["pos"][:, feet, 2:3].double()
+    fpos = torch.cat([fpos, fz], -1).reshape(T, -1)
+    fvel = torch.stack([to_heading(out["lin_vel"][:, k, :2].double()) for k in feet.tolist()], 1)
+    fvel = torch.cat([fvel, out["lin_vel"][:, feet, 2:3].double()], -1).reshape(T, -1)
+    vel = torch.gradient(pos, spacing=dt, dim=0)[0]
+    root_vel = torch.cat([to_heading(vel), torch.gradient(yaw, spacing=dt)[0][:, None]], -1)
+    traj_pos = [t.float() for t in traj_pos]
+    traj_dir = [t.float() for t in traj_dir]
+    fpos, fvel, root_vel = fpos.float(), fvel.float(), root_vel.float()
     match = torch.cat([torch.cat(traj_pos, -1), torch.cat(traj_dir, -1), fpos, fvel, root_vel], -1)
     return goal, match
 

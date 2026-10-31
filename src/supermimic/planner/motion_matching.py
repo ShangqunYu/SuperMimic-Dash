@@ -47,12 +47,13 @@ class PlannerCfg:
     blend_halflife: float = 0.1  # s, inertialization decay
     vel_halflife: float = 0.3  # s, spring from current to commanded linear velocity
     yaw_halflife: float = 0.25  # s, same for yaw rate
-    jump_margin: float = 0.02  # a jump must beat continuing by this much (normalized cost)
+    jump_margin: float = 0.02  # a jump must beat continuing by this much (normalized cost) ...
+    jump_ratio: float = 0.2  # ... and by this fraction of the continuation cost
     same_clip_window: int = 20  # frames: ignore candidates this close to the playing frame
 
 
 class MotionDatabase:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, use_tree: bool = True):
         d = np.load(path, allow_pickle=False)
         self.goal = d["goal"].astype(np.float32)  # (F, 46)
         self.match = d["match"].astype(np.float32)  # (F, D) raw
@@ -66,6 +67,30 @@ class MotionDatabase:
         self.norm = (self.match - self.mean) / self.scale
         self.cand = np.nonzero(self.valid)[0]
         self.cand_norm = np.ascontiguousarray(self.norm[self.cand])
+        # Exact nearest-neighbour search with a KD-tree when scipy is available (~1 ms instead of
+        # ~50 ms brute force on 750k candidates); results are identical.
+        self.tree = None
+        if use_tree:
+            try:
+                from scipy.spatial import cKDTree
+
+                self.tree = cKDTree(self.cand_norm)
+            except ImportError:
+                pass
+
+    def nearest(self, q: np.ndarray, exclude) -> tuple[int, float]:
+        """Best candidate (database frame, squared cost) not rejected by ``exclude(frames) -> bool mask``."""
+        if self.tree is not None:
+            for k in (16, 256):
+                dist, idx = self.tree.query(q, k=k)
+                ok = ~exclude(self.cand[idx])
+                if ok.any():
+                    i = int(np.argmax(ok))
+                    return int(self.cand[idx[i]]), float(dist[i]) ** 2
+        cost = ((self.cand_norm - q) ** 2).sum(-1)
+        cost[exclude(self.cand)] = np.inf
+        j = int(np.argmin(cost))
+        return int(self.cand[j]), float(cost[j])
 
     def __len__(self) -> int:
         return self.goal.shape[0]
@@ -113,15 +138,13 @@ class MotionMatcher:
     def _search(self, cmd: np.ndarray, forced: bool) -> None:
         db, cfg = self.db, self.cfg
         q = self._query(cmd)
-        cost = ((db.cand_norm - q) ** 2).sum(-1)
-        near = (db.clip_of[db.cand] == db.clip_of[self.frame]) & (np.abs(db.cand - self.frame) < cfg.same_clip_window)
-        cost[near] = np.inf
-        j = int(np.argmin(cost))
+        cur_clip = db.clip_of[self.frame]
+        best, cost = db.nearest(q, lambda f: (db.clip_of[f] == cur_clip) & (np.abs(f - self.frame) < cfg.same_clip_window))
         if not forced:
             cont = float(((db.norm[self.frame] - q) ** 2).sum())
-            if not cost[j] < cont - cfg.jump_margin:
+            if not cost < cont * (1.0 - cfg.jump_ratio) - cfg.jump_margin:
                 return
-        self._jump(int(db.cand[j]))
+        self._jump(best)
 
     def _jump(self, new: int) -> None:
         old_now = self._feat(self.frame, 0)
