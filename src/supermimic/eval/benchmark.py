@@ -41,8 +41,10 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1") -> list[ClipResult]:
-    num_envs = min(num_envs or 1024, len(npz_files))
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1", num_clips: int | None = None) -> list[ClipResult]:
+    """``npz_files`` may be one packed .pt library; then ``num_clips`` (its clip count) sizes the env batch."""
+    packed = len(npz_files) == 1 and str(npz_files[0]).endswith(".pt")
+    num_envs = min(num_envs or 1024, num_clips if packed and num_clips else len(npz_files))
     args = SuperMimicEnvCfgArgs(
         npz_files=npz_files,
         robot=robot,
@@ -57,6 +59,7 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         record_transitions=False,
         seed=0,
         anchor_obs=anchor_obs,
+        compact_library=packed,
     )
     env = make_env(args, device=device)
     try:

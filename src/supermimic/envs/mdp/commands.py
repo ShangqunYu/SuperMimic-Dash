@@ -63,6 +63,16 @@ class MultiClipMotionCommand(CommandTerm):
         print(f"[INFO] {self.library.summary()}")
         lib = self.library
 
+        # Terrain clips play on their tile (supermimic/terrain/tiles.py): at reset the env's origin
+        # moves to the tile of the sampled clip, and back to its own flat origin for flat clips.
+        self.flat_origins = env.scene.env_origins.clone()
+        self.tile_origin = None
+        if bool((lib.clip_tile >= 0).any()):
+            from supermimic.terrain.tiles import tile_origins
+
+            n_tiles = int(lib.clip_tile.max().item()) + 1
+            self.tile_origin = torch.as_tensor(tile_origins(n_tiles), dtype=torch.float, device=self.device)
+
         n = self.num_envs
         self.frame = torch.zeros(n, dtype=torch.long, device=self.device)
         self.clip_end = torch.zeros(n, dtype=torch.bool, device=self.device)
@@ -324,6 +334,7 @@ class MultiClipMotionCommand(CommandTerm):
         forced = self.forced_frame[env_ids]
         self.frame[env_ids] = torch.where(forced >= 0, forced, sampled)
         self.clip_end[env_ids] = False
+        self._place_on_terrain(env_ids, self.frame[env_ids])
 
         r = self.library.ref(self.frame[env_ids])
         root_pos = r.root_pos_w + self._env.scene.env_origins[env_ids]
@@ -347,6 +358,21 @@ class MultiClipMotionCommand(CommandTerm):
             joint_pos = joint_pos + sample_uniform(lo, hi, joint_pos.shape, device=self.device)
 
         self._write_reference_state_to_sim(env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel)
+
+    def _place_on_terrain(self, env_ids: torch.Tensor, frames: torch.Tensor) -> None:
+        """Move the origins of ``env_ids`` to the tiles of the clips of ``frames`` (flat clips: own origin)."""
+        if self.tile_origin is None:
+            return
+        tile = self.library.clip_tile[self.library.frame_clip[frames]]
+        o = self.flat_origins[env_ids].clone()
+        on = tile >= 0
+        o[on] = self.tile_origin[tile[on]]
+        self._env.scene.env_origins[env_ids] = o
+
+    @property
+    def clip_tile(self) -> torch.Tensor:
+        """(N,) terrain tile of each env's current clip, -1 for flat clips."""
+        return self.library.clip_tile[self.library.frame_clip[self.frame]]
 
     def update_relative_body_poses(self) -> None:
         nb = len(self.cfg.body_names)
@@ -384,6 +410,7 @@ class MultiClipMotionCommand(CommandTerm):
         self.ep_len[env_ids] = 0
         self.frame[env_ids] = frame
         self.clip_end[env_ids] = False
+        self._place_on_terrain(env_ids, frame)
         r = self.library.ref(frame)
         self._write_reference_state_to_sim(
             env_ids, r.root_pos_w + self._env.scene.env_origins[env_ids], r.root_quat_w, r.root_lin_vel_w, r.root_ang_vel_w, r.joint_pos, r.joint_vel

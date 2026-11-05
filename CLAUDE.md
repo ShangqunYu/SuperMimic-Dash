@@ -163,6 +163,39 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
       `box_width`, `d`, `c`.
   - Not trimmed yet; the user may trim later.
 - **Depth camera:** `realsense_depth` in mjlab_dash `dash_constants.py`.
+- **In simulation:**
+  - **`scripts/terrain/build_terrain_library.py`:**
+    - Puts each clip into its tile's frame (yaw plus a planar shift),
+      resamples to 50 fps and packs a compact library (optionally prepending
+      the flat pack, `--flat`).
+    - The pack carries `clip_tile`, `tile_names` and `tiles`, plus a
+      sidecar `<pack>.tiles.npz`.
+    - 38 tiles:
+      - `box30`, shared by 2,799 clips
+      - 26 `stairs_<clip>`
+      - 11 `jump_h<cm>_d<cm>`
+  - **`src/supermimic/terrain/tiles.py`:**
+    - `ClipTilesTerrainCfg`: one mjlab generator patch holding the floor plus
+      all tile boxes.
+    - Tiles sit on a grid from x = 30 m, 16 m apart. Flat clips spawn at the
+      world origin; they travel at most 8.6 m.
+    - The env config switches to it when `load_tiles(npz_files[0])` finds
+      the sidecar.
+  - **`MultiClipMotionCommand._place_on_terrain`:**
+    - At reset, an env's `scene.env_origins` row moves to the sampled clip's
+      tile, or back to its flat origin. Each env is its own MuJoCo world, so
+      any number of envs share a tile.
+    - `StateIO` reads the origins live.
+  - **Checks:**
+    - `scripts/terrain/check_tiles.py` (CPU replay on the tiles): robot
+      penetration p50 1.3 cm, max 4.6 cm.
+    - `scripts/terrain/eval_terrain.py` (benchmark plus rollout video):
+      dash_e2_hwdr, the blind flat policy, fails 2,679 of 3,019 terrain
+      clips. Come-up fails 99.9%, come-down 82%, stairs 96%, forward leaps
+      27%.
+  - Rendering from `env.sim.mj_model` with `qpos` gives an exploded robot. Use
+    the robot XML plus the tile (`check_tiles.tile_model`) in the tile frame
+    instead.
 
 ## Port status (2026-10-27, lab server)
 

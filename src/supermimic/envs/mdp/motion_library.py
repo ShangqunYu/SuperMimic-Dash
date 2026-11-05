@@ -102,6 +102,7 @@ class MotionLibrary:
         self.default_joint_pos = q0
 
         clips: list[ClipInfo] = []
+        clip_tile = None  # per clip: index of its terrain tile (packed terrain libraries), -1 = flat
         start = 0
         body_idx = root_idx = None
         ref_chunks: list[np.ndarray] = []
@@ -114,6 +115,7 @@ class MotionLibrary:
             assert pack.get("robot", "g1") == robot.name, f"library is for {pack.get('robot', 'g1')}, not {robot.name}"
             self._ref = pack["ref"].to(device=self.device, dtype=store_dtype)
             clips = [ClipInfo(n, int(st), int(ln)) for n, st, ln in zip(pack["names"], pack["starts"], pack["lengths"])]
+            clip_tile = pack.get("clip_tile")
             start = int(self._ref.shape[0])
             ref_chunks = None
         for f in (npz_files if ref_chunks is not None else []):
@@ -163,6 +165,7 @@ class MotionLibrary:
         self.clip_start = torch.tensor([c.start for c in clips], device=self.device, dtype=torch.long)
         self.clip_len = torch.tensor([c.length for c in clips], device=self.device, dtype=torch.long)
         self.clip_last = self.clip_start + self.clip_len - 1
+        self.clip_tile = torch.tensor(clip_tile if clip_tile is not None else [-1] * self.num_clips, device=self.device, dtype=torch.long)
         self.frame_clip = torch.repeat_interleave(torch.arange(self.num_clips, device=self.device), self.clip_len)
         # Bins of `bin_frames` frames inside each clip (plan D14), numbered globally.
         bins_per_clip = (self.clip_len + self.bin_frames - 1) // self.bin_frames

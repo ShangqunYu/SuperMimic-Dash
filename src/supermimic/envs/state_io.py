@@ -11,7 +11,8 @@ class StateIO:
         self.sim = env.sim
         # States are stored relative to each env's origin so that they are directly comparable
         # with the (origin-free) motion library and translation-invariant across envs.
-        self.origins = env.scene.env_origins.clone()  # (N, 3)
+        # Live tensor (not a copy): terrain clips move an env's origin to its tile at reset.
+        self.origins = env.scene.env_origins  # (N, 3)
         self.nq = int(self.sim.data.qpos.shape[-1])
         self.nv = int(self.sim.data.qvel.shape[-1])
         # A single free-floating robot and nothing else in the scene: qpos = 7 + NJ, qvel = 6 + NJ.

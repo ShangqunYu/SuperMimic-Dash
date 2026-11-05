@@ -27,7 +27,7 @@ from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.tasks.tracking import mdp as track_mdp
-from mjlab.terrains import TerrainEntityCfg
+from mjlab.terrains import TerrainEntityCfg  # noqa: F401
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
@@ -36,6 +36,7 @@ from supermimic.envs.actions import NoisyJointPositionActionCfg
 from supermimic.envs.mdp import observations as sm_obs
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
+from supermimic.terrain.tiles import load_tiles, terrain_entity_cfg
 from supermimic.robots import get_robot
 
 class QuietSimulationCfg(SimulationCfg):
@@ -223,7 +224,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot.foot_geom_regex, "com_body_name": robot.com_body, "hardware_xi": a.hardware_dr})
 
     cfg = ManagerBasedRlEnvCfg(
-        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.command_delay else robot.entity_cfg()}),
+        scene=SceneCfg(terrain=terrain_entity_cfg(load_tiles(a.npz_files[0]) if len(a.npz_files) == 1 else None), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.command_delay else robot.entity_cfg()}),
         observations=observations,
         actions=actions,
         commands=commands,
