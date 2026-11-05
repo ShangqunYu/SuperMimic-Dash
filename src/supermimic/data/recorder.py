@@ -34,11 +34,15 @@ class ReplayRecorder(RecorderTerm):
         self.ctx = SimContext(env, p["foot_geom_regex"], p["com_body_name"], hardware=bool(p.get("hardware_xi", False)))
         self.command_name = p.get("command_name", "motion")
         self.action_name = p.get("action_name", "joint_pos")
+        # Terrain libraries: xi gets the env's tile index (-1 = flat) as a last column, from which
+        # the world model computes its height scan (world_model/state_spec.py: height_scan).
+        self.terrain_xi = bool(p.get("terrain_xi", False))
         n = env.num_envs
         self.num_joints = self.state_io.num_joints
-        self.buffer = ReplayBuffer(n, int(p["capacity"]), self.state_io.state_dim, self.num_joints, self.ctx.xi_dim, env.device)
+        self.xi_dim = self.ctx.xi_dim + (1 if self.terrain_xi else 0)
+        self.buffer = ReplayBuffer(n, int(p["capacity"]), self.state_io.state_dim, self.num_joints, self.xi_dim, env.device)
         self.prev_s = torch.zeros(n, self.state_io.state_dim, device=env.device)
-        self.prev_xi = torch.zeros(n, self.ctx.xi_dim, device=env.device)
+        self.prev_xi = torch.zeros(n, self.xi_dim, device=env.device)
         self.prev_frame = torch.zeros(n, dtype=torch.long, device=env.device)
         self.prev_clip = torch.zeros(n, dtype=torch.long, device=env.device)
         self.ep_start = torch.ones(n, dtype=torch.bool, device=env.device)
@@ -56,7 +60,10 @@ class ReplayRecorder(RecorderTerm):
     def _remember(self, ids: torch.Tensor) -> None:
         cmd = self.command
         self.prev_s[ids] = self.state_io.read()[ids]
-        self.prev_xi[ids] = self.ctx.read()[ids]
+        xi = self.ctx.read()
+        if self.terrain_xi:
+            xi = torch.cat([xi, cmd.clip_tile.float()[:, None]], dim=-1)
+        self.prev_xi[ids] = xi[ids]
         self.prev_frame[ids] = cmd.frame[ids]
         self.prev_clip[ids] = cmd.library.frame_clip[cmd.frame[ids]]
 

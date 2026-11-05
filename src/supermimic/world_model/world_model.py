@@ -43,17 +43,35 @@ class WorldModel(nn.Module):
         self.cfg = cfg
         self.num_joints = heads.num_joints
         self.spec = spec = StateSpec(cfg.state_spec, device, self.num_joints)
-        self.dynamics = DynamicsMLP(spec.feat_dim, self.num_joints, spec.xi_dim, spec.delta_dim, hidden=cfg.hidden)
+        self.dynamics = DynamicsMLP(spec.feat_dim, self.num_joints, spec.ctx_dim, spec.delta_dim, hidden=cfg.hidden)
+        if spec.height_scan:
+            from supermimic.terrain.height_scan import HeightScan
+
+            self.scan = HeightScan()  # tiles set with set_terrain(); not part of the state dict
         self.term_head = TerminationHead(cfg.term_hidden, cfg.height_threshold, cfg.tilt_threshold)
         self.heads = heads  # analytic observation / reward / FK (no parameters)
         self.to(device)
 
     # ------------------------------------------------------------------ one step
 
+    def set_terrain(self, tiles) -> None:
+        self.scan.set_tiles(tiles)
+
+    def context(self, s: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        """Network context of state s: normalised xi, plus the height scan when terrain is on.
+        xi broadcasts against s's leading dims."""
+        xi = xi.expand(*s.shape[:-1], xi.shape[-1])
+        x = self.spec.normalize_xi(xi)
+        if not self.spec.height_scan:
+            return x
+        from supermimic.terrain.height_scan import SCAN_SCALE
+
+        return torch.cat([x, self.scan(s, self.spec.tile_of(xi)) / SCAN_SCALE], dim=-1)
+
     def step(self, s: torch.Tensor, action: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
         """s_{t+1} = integrate(s_t, f(s_t, a_t, xi))."""
         feat = self.spec.canonical(s)
-        delta = self.dynamics(feat, action, self.spec.normalize_xi(xi))
+        delta = self.dynamics(feat, action, self.context(s, xi))
         return self.spec.integrate(s, delta)
 
     def termination_logits(self, s_next: torch.Tensor, ref: ReferenceFrame) -> torch.Tensor:

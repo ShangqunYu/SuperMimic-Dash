@@ -196,6 +196,33 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
   - Rendering from `env.sim.mj_model` with `qpos` gives an exploded robot. Use
     the robot XML plus the tile (`check_tiles.tile_model`) in the tile frame
     instead.
+- **Blind tracker, terrain-aware world model** (2026-11-05, user's decision: the
+  policy stays blind, a later depth-conditioned generator plans the references):
+  - The policy learns only in imagination, so the world model needs the terrain,
+    or it averages a step-up with a fall. The world model and the critic get a
+    height scan; the policy never does. ONNX export is unchanged.
+  - xi carries the env's tile index as an extra last column (`data/recorder.py`,
+    `terrain_xi`; -1 = flat). `StateSpec.height_scan` is set by the training loop
+    when the library has tiles. `normalize_xi` drops the column. `ctx_dim` = xi
+    plus the scan.
+  - `terrain/height_scan.py`: a heading-aligned grid around the root, x from -0.35
+    to 0.85 m, y ±0.35 m, 5 cm spacing (375 points). Each value is the absolute
+    ground height in the tile frame, computed exactly from the tile boxes, so it is
+    0 on flat ground. `WorldModel.context(s, xi)` = [normalised xi, scan / 0.5],
+    recomputed every imagined step.
+  - Warm start (`init_from`): zero input columns are inserted into the first layer
+    of the dynamics and the critic, so they start exactly as before. The WM Adam
+    state is then fresh, and the first updates raise WM nse1 from about 0.003 to
+    0.07; it recovers to about 0.01 within 400 iterations. Sampler bins of a
+    `--flat` mixed library are e2's as a prefix and are copied.
+  - `--env.terrain-ratio`: this share of "return" resets is drawn uniformly from
+    terrain bins. Log keys `wm/online_nse_{1,8}step_terrain`.
+  - Mixed library `data/library/dash_flat_terrain_compact.pt`: 67,122 clips,
+    132.2 h (3,019 terrain clips, 2.96 h).
+  - **Run `dash_t1_blind`** (started 2026-11-05 ~14:00, GPU 0, shared with other
+    users' jobs, ~2 it/s): init from dash_e2_hwdr, mixed library, hardware DR,
+    terrain ratio 0.25, lr 1e-4, policy batch 2048, 40k iterations. Log
+    `logs/dash_t1_blind.out`.
 
 ## Port status (2026-10-27, lab server)
 

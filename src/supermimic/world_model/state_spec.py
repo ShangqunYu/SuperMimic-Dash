@@ -60,6 +60,10 @@ class StateSpecCfg:
     xi_hw_bodies: int = 0
     xi_hw_offset: tuple[float, ...] = (1.0, 1.0, 0.02, 1.0, 0.965)
     xi_hw_scale: tuple[float, ...] = (0.2, 0.3, 0.015, 1.0, 0.05)
+    # Terrain: xi carries the env's tile index as its last column (data/recorder.py), and the
+    # dynamics and critic get a height scan of the tile around the root (terrain/height_scan.py)
+    # next to the normalised xi. Set by the training loop when the library has terrain tiles.
+    height_scan: bool = False
 
 
 class StateSpec:
@@ -70,7 +74,16 @@ class StateSpec:
         self.state_dim = self.feat_dim = 13 + 2 * nj
         self.delta_dim = 12 + 2 * nj
         nb = cfg.xi_hw_bodies
-        self.xi_dim = xi_dim(nj, nb, hardware=nb > 0)
+        self.xi_base_dim = xi_dim(nj, nb, hardware=nb > 0)
+        self.height_scan = cfg.height_scan
+        # Raw xi (as stored in the replay buffer) and the network context [normalised xi, scan].
+        self.xi_dim = self.xi_base_dim + (1 if cfg.height_scan else 0)
+        if cfg.height_scan:
+            from supermimic.terrain.height_scan import SCAN_DIM
+
+            self.ctx_dim = self.xi_base_dim + SCAN_DIM
+        else:
+            self.ctx_dim = self.xi_base_dim
         rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])  # noqa: E731
         self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, nj, nj)).to(device=device, dtype=dtype)
         self.out_scale = rep(cfg.out_scale, (3, 3, nj, 3, 3, nj)).to(device=device, dtype=dtype)
@@ -82,7 +95,7 @@ class StateSpec:
             xi_sizes += [nj, nj, nj, nj, nb]
         self.xi_offset = rep(xi_offset, xi_sizes).to(device=device, dtype=dtype)
         self.xi_scale = rep(xi_scale, xi_sizes).to(device=device, dtype=dtype)
-        assert self.xi_offset.numel() == self.xi_dim
+        assert self.xi_offset.numel() == self.xi_base_dim
 
     # ------------------------------------------------------------------ split / features
 
@@ -101,7 +114,11 @@ class StateSpec:
         return feat / self.in_scale
 
     def normalize_xi(self, xi: torch.Tensor) -> torch.Tensor:
-        return (xi - self.xi_offset) / self.xi_scale
+        """Normalised physical xi (the tile index column, if any, is dropped)."""
+        return (xi[..., : self.xi_base_dim] - self.xi_offset) / self.xi_scale
+
+    def tile_of(self, xi: torch.Tensor) -> torch.Tensor:
+        return xi[..., self.xi_base_dim]
 
     # ------------------------------------------------------------------ integration
 

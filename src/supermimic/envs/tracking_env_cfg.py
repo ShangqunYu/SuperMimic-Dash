@@ -67,6 +67,7 @@ class SuperMimicEnvCfgArgs:
     # depend on earlier actions, which the world model does not see.
     command_delay: bool = False
     sampling_mode: str = "return"  # return | uniform | start
+    terrain_ratio: float = 0.0  # share of resets on terrain clips (mixed flat + terrain library)
     replay_capacity: int = 1000
     record_transitions: bool = True
     seed: int | None = 0
@@ -146,6 +147,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             velocity_range=vel_range if a.reset_noise else {},
             joint_position_range=(-0.1, 0.1) if a.reset_noise else (0.0, 0.0),
             sampling_mode=a.sampling_mode,  # type: ignore[arg-type]
+            terrain_ratio=a.terrain_ratio,
             compact_library=a.compact_library,
             debug_vis=a.debug_vis,
             **a.extra_command_kwargs,
@@ -220,11 +222,13 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     }
 
     recorders = {}
+    tiles = load_tiles(a.npz_files[0]) if len(a.npz_files) == 1 else None
     if a.record_transitions:
-        recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot.foot_geom_regex, "com_body_name": robot.com_body, "hardware_xi": a.hardware_dr})
+        recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot.foot_geom_regex, "com_body_name": robot.com_body, "hardware_xi": a.hardware_dr,
+                                                        "terrain_xi": tiles is not None})
 
     cfg = ManagerBasedRlEnvCfg(
-        scene=SceneCfg(terrain=terrain_entity_cfg(load_tiles(a.npz_files[0]) if len(a.npz_files) == 1 else None), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.command_delay else robot.entity_cfg()}),
+        scene=SceneCfg(terrain=terrain_entity_cfg(tiles), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.command_delay else robot.entity_cfg()}),
         observations=observations,
         actions=actions,
         commands=commands,

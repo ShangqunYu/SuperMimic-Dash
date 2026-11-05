@@ -73,3 +73,18 @@ class WorldModelTrainer:
         """k-step open-loop error on (recent) replay windows; (k,) tensor."""
         w = buffer.sample_windows(n, k)
         return self.wm.rollout_error(w.states, w.a_exec, w.xi)
+
+    @torch.no_grad()
+    def online_error_terrain(self, buffer: ReplayBuffer, n: int = 4096, k: int = 8) -> torch.Tensor | None:
+        """k-step open-loop error (k,) on the replay windows of terrain clips (None if there are none)."""
+        if not self.wm.spec.height_scan:
+            return None
+        w = buffer.sample_windows(n, k)
+        on = self.wm.spec.tile_of(w.xi) >= 0
+        if not bool(on.any()):
+            return None
+        s, out = w.states[0][on], []
+        for j in range(k):
+            s = self.wm.step(s, w.a_exec[j][on], w.xi[on])
+            out.append(self.wm.spec.normalized_sq_error(s, w.states[j + 1][on]).mean())
+        return torch.stack(out)

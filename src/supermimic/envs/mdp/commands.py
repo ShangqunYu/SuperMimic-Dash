@@ -86,6 +86,8 @@ class MultiClipMotionCommand(CommandTerm):
         # Return-based reset sampling state.
         self.bin_return = torch.full((lib.num_bins,), cfg.g_max, device=self.device)
         self.bin_memory = torch.full((lib.num_bins,), 1.0 / lib.num_bins, device=self.device)
+        # Bins of terrain clips, for the guaranteed terrain share of resets (cfg.terrain_ratio).
+        self.terrain_bin = lib.clip_tile[lib.frame_clip[lib.bin_start]] >= 0
         self.max_ep_steps = min(int(math.ceil(env.cfg.episode_length_s / env.step_dt)) + 2, cfg.max_logged_steps)
         # Evaluation hook: when >= 0, the next reset of that env starts exactly at this global frame.
         self.forced_frame = torch.full((n,), -1, dtype=torch.long, device=self.device)
@@ -296,6 +298,9 @@ class MultiClipMotionCommand(CommandTerm):
             + cfg.memory_ratio * self.bin_memory / self.bin_memory.sum()
         )
         p = p / p.sum()
+        if cfg.terrain_ratio > 0 and bool(self.terrain_bin.any()):
+            t = self.terrain_bin.float()
+            p = (1 - cfg.terrain_ratio) * p + cfg.terrain_ratio * t / t.sum()
         b = torch.multinomial(p, n, replacement=True)
         u = torch.rand(n, device=self.device)
         f = lib.bin_start[b] + (u * (lib.bin_end[b] - lib.bin_start[b]).float()).long()
@@ -468,6 +473,9 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     uniform_ratio: float = 0.5
     hard_ratio: float = 0.4
     memory_ratio: float = 0.1
+    # Mixed flat + terrain libraries: this fraction of "return" resets is drawn uniformly from the
+    # terrain clips' bins (they are ~2% of the frames), on top of the mixture above.
+    terrain_ratio: float = 0.0
     softmax_temp: float = 25.0
     g_max: float = 10.0
     gamma: float = 0.99

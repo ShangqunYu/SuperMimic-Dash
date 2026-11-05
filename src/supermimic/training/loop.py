@@ -18,11 +18,26 @@ from supermimic.interfaces.velocity import CommandSampler, fall_features, refere
 from supermimic.kinematics.fk import Kinematics
 from supermimic.policy.nets import Critic, Policy, VelocityCritic
 from supermimic.robots import get_robot
+from supermimic.terrain.tiles import load_tiles
 from supermimic.training.distributed import allreduce_mean, broadcast_params, finalize, init_distributed, world_size
 from supermimic.training.schedule import cosine_lr
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.wm_trainer import WorldModelTrainer
 from supermimic.world_model.world_model import WorldModel
+
+
+def _widen_first_layer(module: torch.nn.Module, sd: dict, key: str, from_end: int) -> bool:
+    """If ``module``'s first-layer weight ``key`` has more inputs than the checkpoint's, insert zero
+    columns before the last ``from_end`` inputs of the checkpoint weight (in place in ``sd``)."""
+    w_new = module.state_dict()[key]
+    w = sd[key]
+    extra = w_new.shape[1] - w.shape[1]
+    if extra == 0:
+        return False
+    assert extra > 0 and w.shape[0] == w_new.shape[0], (key, w.shape, w_new.shape)
+    cut = w.shape[1] - from_end
+    sd[key] = torch.cat([w[:, :cut], w.new_zeros(w.shape[0], extra), w[:, cut:]], dim=1)
+    return True
 
 
 class Trainer:
@@ -62,6 +77,9 @@ class Trainer:
             files = discover_npz(cfg.data.npz_dir, limit=cfg.data.limit, names=cfg.data.clips, manifest=cfg.data.manifest)
         if not files:
             raise FileNotFoundError(f"no clips under {cfg.data.npz_dir}")
+        # A library with terrain tiles: the world model and critic get a height scan (the policy does not).
+        tiles = load_tiles(files[0]) if len(files) == 1 else None
+        cfg.world_model.state_spec.height_scan = tiles is not None
         self.env = make_env(
             SuperMimicEnvCfgArgs(
                 npz_files=[str(f) for f in files],
@@ -76,6 +94,7 @@ class Trainer:
                 hardware_dr=cfg.env.hardware_dr,
                 command_delay=cfg.env.command_delay,
                 sampling_mode=cfg.env.sampling_mode,
+                terrain_ratio=cfg.env.terrain_ratio,
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,
@@ -95,8 +114,10 @@ class Trainer:
         fk = Kinematics(spec.load_model(), device=self.device)
         heads = AnalyticHeads(fk, spec.tracked_bodies, spec.anchor_body, spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         self.wm = WorldModel(cfg.world_model, heads, self.device)
+        if tiles is not None:
+            self.wm.set_terrain(tiles)
         self.policy = Policy(cfg.policy).to(self.device)
-        self.critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=self.wm.spec.xi_dim).to(self.device)
+        self.critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=self.wm.spec.ctx_dim).to(self.device)
         assert self.buffer.xi.shape[-1] == self.wm.spec.xi_dim, (self.buffer.xi.shape, self.wm.spec.xi_dim)
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
@@ -119,7 +140,7 @@ class Trainer:
                 up.append(f[(feats[:, 0] > vcfg.fall_height + 0.25) & (feats[:, 1] < 0.3)])
             self.command.untracked_frames = torch.cat(up)
             self.vel_sampler = CommandSampler(len(self.vel_ids), self.ref_cmd, vcfg, self.device)
-            self.vel_critic = VelocityCritic(cfg.critic, cfg.policy, self.wm.spec.xi_dim).to(self.device)
+            self.vel_critic = VelocityCritic(cfg.critic, cfg.policy, self.wm.spec.ctx_dim).to(self.device)
             broadcast_params(self.vel_critic)
             self.vel = VelocityImagination(vcfg, self.vel_critic, self.ref_cmd, self.command.track_mask, CommandSampler(1, self.ref_cmd, vcfg, self.device))
             self.wm_trainer.track_mask = self.command.track_mask
@@ -193,13 +214,26 @@ class Trainer:
         ck = torch.load(path, map_location=self.device, weights_only=False)
         ck_robot = ck["config"].get("robot", "g1")
         assert ck_robot == self.robot.name, f"checkpoint is for {ck_robot}, run is for {self.robot.name}"
+        # A checkpoint without the height scan: its input columns are inserted as zeros, so the
+        # dynamics and critic start out exactly as before (dynamics input [feat, action, ctx],
+        # critic [feat, goal, ctx, e_root(4)]).
+        grown = _widen_first_layer(self.wm, ck["wm"], "dynamics.mlp.net.0.weight", from_end=0)
+        grown |= _widen_first_layer(self.critic, ck["critic"], "mlp.net.0.weight", from_end=4)
         self.wm.load_state_dict(ck["wm"])
         missing, unexpected = self.policy.load_state_dict(ck["policy"], strict=False)
         assert not unexpected and all(k.startswith("encoders.velocity.") for k in missing), (missing, unexpected)
         self.critic.load_state_dict(ck["critic"])
-        self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
-        self.command.bin_return.copy_(ck["bin_return"])
-        self.command.bin_memory.copy_(ck["bin_memory"])
+        if not grown:
+            self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
+        # Sampler statistics: a mixed library built with --flat starts with the checkpoint's flat
+        # library, so its bins are a prefix of ours; the terrain bins start fresh.
+        nb = ck["bin_return"].numel()
+        if nb <= self.command.bin_return.numel():
+            self.command.bin_return[:nb] = ck["bin_return"]
+            self.command.bin_memory[:nb] = ck["bin_memory"]
+            self.command.bin_memory /= self.command.bin_memory.sum()
+        elif self.is_main:
+            print(f"[WARN] init_from: checkpoint has {nb} sampler bins, library {self.command.bin_return.numel()}: sampler starts fresh")
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         if self.is_main:
@@ -342,8 +376,13 @@ class Trainer:
                         err = self.wm_trainer.online_error(self.buffer, n=1024, k=8)
                         self.writer.add_scalar("wm/online_nse_1step", float(err[0]), it)
                         self.writer.add_scalar("wm/online_nse_8step", float(err[-1]), it)
+                        err_t = self.wm_trainer.online_error_terrain(self.buffer)
+                        if err_t is not None:
+                            self.writer.add_scalar("wm/online_nse_1step_terrain", float(err_t[0]), it)
+                            self.writer.add_scalar("wm/online_nse_8step_terrain", float(err_t[-1]), it)
                     else:
                         err = None
+                        err_t = None
                 if self.is_main:
                     for k, v in timers.items():
                         self.writer.add_scalar(f"time/{k}_s_per_iter", v / sch.log_interval, it)
@@ -365,7 +404,8 @@ class Trainer:
                     msg = (
                         f"it {it} | {elapsed/3600:.2f} h | {sch.log_interval / dt_log:.1f} it/s | updates {self.num_updates} | "
                         f"train_ret {tr:.3f} (n={n_finished}) | "
-                        f"wm nse1 {agg.get('wm/nse_1step', float('nan'))/max(agg_n,1):.4f} nse8 {(float(err[-1]) if err is not None else float('nan')):.4f} | "
+                        f"wm nse1 {agg.get('wm/nse_1step', float('nan'))/max(agg_n,1):.4f} nse8 {(float(err[-1]) if err is not None else float('nan')):.4f}"
+                        + (f" terrain nse1 {float(err_t[0]):.4f} nse8 {float(err_t[-1]):.4f}" if err_t is not None else "") + " | "
                         f"imag_ret {agg.get('policy/imag_return_undisc', float('nan'))/max(agg_n,1):.3f} surv {agg.get('policy/imag_survival_H', float('nan'))/max(agg_n,1):.3f} | "
                         f"t sim/wm/pi {timers['sim']:.1f}/{timers['wm']:.1f}/{timers['policy']:.1f}s"
                     )

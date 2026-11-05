@@ -32,6 +32,7 @@ class EnvCfg:
     hardware_dr: bool = False  # robot's hardware DR (Dash only); its parameters enter xi
     command_delay: bool = False  # actuator command delay (Dash: 0-25 ms); not modelled by the world model
     sampling_mode: str = "return"
+    terrain_ratio: float = 0.0  # share of resets on terrain clips (mixed flat + terrain library)
     replay_capacity: int = 1000
     future_frames: int = 10
     compact_library: bool = False

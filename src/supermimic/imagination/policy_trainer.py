@@ -117,26 +117,26 @@ class PolicyTrainer:
         v = self.velocity
         n_vel = int(round(cfg.batch_size * v.cfg.batch_fraction)) if v is not None else 0
         start = buffer.sample_starts(cfg.batch_size - n_vel, cfg.history, env_mask=None if v is None else v.track_mask)
-        xi_norm = self.wm.spec.normalize_xi(start.xi)
 
         # ---- actor: BPTT through the frozen world model ------------------------------------
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
         ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
         feat, goals, e_root = self._critic_inputs(ro)
+        ctx = self.wm.context(ro.states, start.xi)  # (H+1, n, ctx): normalised xi (+ height scan)
         if cfg.use_critic:
-            v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])
+            v_H = self.critic(feat[-1], goals[-1], ctx[-1], e_root[-1])
         else:
             v_H = None
         J = policy_objective(ro, v_H, cfg.gamma)
         loss = -J / cfg.horizon
         if n_vel > 0:
             vstart, cmd0, from_ref = self._velocity_starts(buffer, n_vel)
-            vxi_norm = self.wm.spec.normalize_xi(vstart.xi)
             vro = imagine_velocity(self.wm, self.policy, self.lib, vstart, cmd0, from_ref, v.ref_cmd, cfg.horizon, self.vel_step_fn, cfg.future_frames, obs_noise=cfg.obs_noise)
             v.critic.requires_grad_(False)
             vfeat = self.wm.spec.canonical(vro.states.reshape(-1, vro.states.shape[-1])).reshape(*vro.states.shape[:2], -1)
-            vv_H = v.critic(vfeat[-1], vro.cmds[-1], vxi_norm) if cfg.use_critic else None
+            vctx = self.wm.context(vro.states, vstart.xi)
+            vv_H = v.critic(vfeat[-1], vro.cmds[-1], vctx[-1]) if cfg.use_critic else None
             J_vel = policy_objective(vro, vv_H, cfg.gamma)
             loss = loss - J_vel / cfg.horizon + v.cfg.align_weight * vro.align_loss
         self.opt.zero_grad(set_to_none=True)
@@ -165,7 +165,7 @@ class PolicyTrainer:
         # ---- critics: fit to GAE targets of this rollout (targets fixed) --------------------
         if cfg.use_critic:
             H1, n, _ = feat.shape
-            m = self._fit_critic(self.critic, self.critic_opt, [feat.detach(), goals.detach(), xi_norm[None].expand(H1, n, -1), e_root.detach()], ro.rewards.detach(), ro.dhat[1:].detach())
+            m = self._fit_critic(self.critic, self.critic_opt, [feat.detach(), goals.detach(), ctx.detach(), e_root.detach()], ro.rewards.detach(), ro.dhat[1:].detach())
             metrics.update(m)
         if n_vel > 0:
             metrics.update(
@@ -178,7 +178,7 @@ class PolicyTrainer:
                 metrics[f"vel_imag_r/{k}"] = val
             if cfg.use_critic:
                 H1, n, _ = vfeat.shape
-                m = self._fit_critic(v.critic, self.vel_critic_opt, [vfeat.detach(), vro.cmds.detach(), vxi_norm[None].expand(H1, n, -1)], vro.rewards.detach(), vro.dhat[1:].detach())
+                m = self._fit_critic(v.critic, self.vel_critic_opt, [vfeat.detach(), vro.cmds.detach(), vctx.detach()], vro.rewards.detach(), vro.dhat[1:].detach())
                 metrics.update({f"vel_{k}": val for k, val in m.items()})
         return metrics
 
