@@ -64,7 +64,7 @@ other Python packages on its path.
 
 ## Dataset (BONES-SEED → Dash), built 2026-10-26/27
 
-Everything is on the external SSD "Crucial X10" (exFAT), under
+Everything is on the external SSD "Crucial X10" (exFAT; relabelled `Dash` on the lab server), under
 `/media/simon/Crucial X10/dash_retarget/`. Copy `npz/` to local NVMe for
 training: exFAT is very slow at opening tens of thousands of files in one
 folder.
@@ -108,9 +108,65 @@ folder.
   with FK. So our npz should feed `build_library.py` directly once FK and the
   robot spec are Dash.
 
+## Terrain dataset (2026-11-05, lab server)
+
+Goal: rough-terrain tracking, in the style of Generate-Track-Improve (arXiv
+2609.31577, which also starts from BONES-SEED). BONES-SEED has no terrain
+geometry, only prop labels, so the terrain is recovered from Dash's footholds.
+
+- **Retarget:** the same mocap_retargeting setup (pixi at `~/.pixi/bin/pixi`),
+  unchanged. Its floor constraint is only `z >= 0`, so box and stair footholds
+  pass through.
+- **Data:** 1,634 prop clips plus mirrors, in `data/terrain/raw/` (q at
+  120 fps, plus the scaled human `mocap`).
+  - Box, stairs (walking only) and no-hands obstacle jumps.
+  - Running jumps, double jumps and forward leaps come from the flat set on
+    the SSD.
+- **`scripts/terrain/pilot_terrain.py`:**
+  - Foothold detection: a foot capsule end that is still.
+  - Heights clustered into levels.
+  - Straight-edge profile along the walking direction, scoring and rendering.
+- **`scripts/terrain/terrain_edit.py`:** fits clean terrain and edits the
+  motion onto it (GTI's "foot offsets between contacts, then IK"):
+  - **Box:** two-level profile, top lowered to 0.30 m. The real "50 cm" box
+    is 0.33–0.40 m at Dash scale.
+  - **Stairs:** regular rise and run fitted to all footholds, extended past
+    the clip ends. Run deepened to at least 22 cm; the scaled tread is
+    15.5–20 cm against Dash's 18 cm foot, so feet hung over step edges.
+  - **Each stance phase:** levelled, set at surface height and slid fully
+    onto its tread. Offsets blend over swings, and the torso gets the mean
+    foot offset.
+  - **Leg IK:** damped least squares on the 5 leg joints.
+  - **Swing-clearance lift**, then the legs are re-solved.
+  - **Stair jogging is dropped:** too few footholds, 18 clips.
+- **`scripts/terrain/jump_pilot.py`:**
+  - Box placed under unedited jumps where every foot and shin point clears
+    it by 2 cm.
+  - Obstacle jumps: 25 cm box (the feet clear about 50 cm). Leaps: 8–12 cm,
+    forward leaps only (travel within 30° of the heading).
+- **Result:** `data/terrain/manifest.csv`, 3,417 clips, of which 3,019 pass
+  QA.
+  - QA thresholds:
+    - foot penetration ≤ 4 cm
+    - shin penetration ≤ 3 cm
+    - stance IK error ≤ 3 cm
+    - < 80% sole support on ≤ 25% of standing frames
+  - Passing clips by type:
+    - box come up 1,645, come down 1,086, jump on/off 68
+    - stairs 26
+    - jumps 194
+  - Boxes dominate, so oversample stairs and jumps.
+  - Outputs:
+    - `data/terrain/edited/*.npz`: `qpos` at 60 fps; profile `c`, `d`,
+      `edges`, `heights`, where `h(xy) = heights[searchsorted(edges, (xy - c) @ d)]`.
+    - `data/terrain/edited_jumps/*.npz`: `qpos`, `box_s`, `box_height`,
+      `box_width`, `d`, `c`.
+  - Not trimmed yet; the user may trim later.
+- **Depth camera:** `realsense_depth` in mjlab_dash `dash_constants.py`.
+
 ## Port status (2026-10-27, lab server)
 
-Lab server: 2× RTX PRO 6000 Max-Q, SSD at `/media/shangqunyu/Crucial X10`, `uv` at
+Lab server: 2× RTX PRO 6000 Max-Q, SSD relabelled `Dash` (3.6 TB exFAT, 2026-11-04) at `/media/shangqunyu/Dash`, `uv` at
 `~/.local/bin/uv` (not on PATH). Local data (gitignored): `data/npz/dash_bones_seed/`
 (64,103 clips, load-checked), `data/library/dash_bones_seed_compact.pt` (23.26M frames,
 129.25 h, 2.28 GB fp16), LAFAN1 G1 data in `data/raw/lafan1`, `data/npz/lafan1` so the
