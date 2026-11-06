@@ -256,6 +256,11 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
     - 438 clips fixed (mostly floor sitting), 40 newly failing (sitting, reach
       jump, jog).
     - So flat tracking did not degrade.
+  - **Run `dash_t2_blind_v2`** (started 2026-11-06 ~12:30, GPU 1): fine-tune of t1 40k on
+    the fixed-IK mixed library `data/library/dash_flat_terrain_v2_compact.pt` (67,071
+    clips, 2,968 terrain), same flags as t1, 20k iterations. Log `logs/dash_t2_blind_v2.out`.
+    `init_from` from a checkpoint with more sampler bins than the library (another terrain
+    set) keeps only the leading flat bins.
 
 ## Port status (2026-10-27, lab server)
 

@@ -226,14 +226,18 @@ class Trainer:
         if not grown:
             self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
         # Sampler statistics: a mixed library built with --flat starts with the checkpoint's flat
-        # library, so its bins are a prefix of ours; the terrain bins start fresh.
+        # library, so its bins are a prefix of ours; the terrain bins start fresh. From a checkpoint
+        # trained on another terrain set (more bins than ours), only the leading flat bins are kept.
         nb = ck["bin_return"].numel()
-        if nb <= self.command.bin_return.numel():
-            self.command.bin_return[:nb] = ck["bin_return"]
-            self.command.bin_memory[:nb] = ck["bin_memory"]
+        if nb > self.command.bin_return.numel():
+            nb = int((~self.command.terrain_bin).long().cumprod(0).sum())
+            if self.is_main:
+                print(f"[INFO] init_from: checkpoint has {ck['bin_return'].numel()} sampler bins, library "
+                      f"{self.command.bin_return.numel()}: keeping the {nb} leading flat bins")
+        if nb > 0:
+            self.command.bin_return[:nb] = ck["bin_return"][:nb]
+            self.command.bin_memory[:nb] = ck["bin_memory"][:nb]
             self.command.bin_memory /= self.command.bin_memory.sum()
-        elif self.is_main:
-            print(f"[WARN] init_from: checkpoint has {nb} sampler bins, library {self.command.bin_return.numel()}: sampler starts fresh")
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         if self.is_main:
