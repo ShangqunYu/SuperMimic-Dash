@@ -34,7 +34,9 @@ def group(name: str) -> str:
 
 
 @torch.no_grad()
-def rollout_video(ckpt: Path, lib: Path, clips: list[str], out: Path, device: str, width=480, height=360):
+def rollout_video(ckpt: Path, lib: Path, clips: list[str], out: Path, device: str, width=480, height=360, notes: list[str] | None = None, ghost: bool = True):
+    """Policy rollouts of ``clips`` on their tiles, 3 per row; with ``ghost`` the reference is drawn
+    as a translucent copy of the robot. ``notes`` are appended to each clip's label."""
     policy, pcfg = load_policy_from_checkpoint(ckpt, device)
     env = make_env(SuperMimicEnvCfgArgs(npz_files=[str(lib)], robot="dash", num_envs=len(clips), compact_library=True, future_frames=pcfg["env"]["future_frames"],
                                         episode_length_s=1.0e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
@@ -47,6 +49,8 @@ def rollout_video(ckpt: Path, lib: Path, clips: list[str], out: Path, device: st
         obs, _ = env.reset()
         cmd.forced_frame[:] = -1
         T = int(max(lib_.clips[i].length for i in idx))
+        starts = [int(lib_.clip_start[i]) for i in idx]
+        lens = [int(lib_.clips[i].length) for i in idx]
         origin = env.scene.env_origins.clone()
         tile_of = cmd.clip_tile.cpu().numpy()
         qs, alive = [], torch.ones(len(clips), dtype=torch.bool, device=device)
@@ -71,10 +75,17 @@ def rollout_video(ckpt: Path, lib: Path, clips: list[str], out: Path, device: st
     tile_boxes = load_tiles(lib)
     font = ImageFont.truetype("DejaVuSans.ttf", 13)
     tiles = []
+    nj = qs.shape[2] - 7
+    pack_ref = torch.load(lib, map_location="cpu", weights_only=False)["ref"] if ghost else None
     for e, name in enumerate(clips):
+        if ghost:
+            st = starts[e]
+            ref = pack_ref[st : st + lens[e], : 7 + nj].float().numpy()
         m = tile_model(tile_boxes[tile_of[e]] if tile_of[e] >= 0 else np.zeros((0, 6)), width, height)
         d = mujoco.MjData(m)
+        dg = mujoco.MjData(m)
         r = mujoco.Renderer(m, height, width)
+        vopt, pert = mujoco.MjvOption(), mujoco.MjvPerturb()
         cam = mujoco.MjvCamera()
         cam.distance, cam.elevation, cam.azimuth = 2.6, -15.0, 90.0
         frames = []
@@ -85,8 +96,16 @@ def rollout_video(ckpt: Path, lib: Path, clips: list[str], out: Path, device: st
             look = 0.9 * look + 0.1 * qs[e, t, :3]
             cam.lookat[:] = [look[0], look[1], look[2] - 0.25]
             r.update_scene(d, cam)
+            if ghost:
+                dg.qpos[: 7 + nj] = ref[min(t + 1, len(ref) - 1)]
+                mujoco.mj_forward(m, dg)
+                n0 = r.scene.ngeom
+                mujoco.mjv_addGeoms(m, dg, vopt, pert, mujoco.mjtCatBit.mjCAT_DYNAMIC, r.scene)
+                for g in range(n0, r.scene.ngeom):
+                    r.scene.geoms[g].rgba[:] = (0.2, 0.8, 0.3, 0.3)
             img = Image.fromarray(r.render())
-            ImageDraw.Draw(img).text((6, 4), name.removeprefix("dash_")[:60], fill=(10, 10, 10), font=font)
+            label = name.removeprefix("dash_")[:52] + (f"  {notes[e]}" if notes else "")
+            ImageDraw.Draw(img).text((6, 4), label, fill=(10, 10, 10), font=font)
             frames.append(np.asarray(img))
         tiles.append(frames)
     n = len(tiles)
