@@ -136,17 +136,35 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
   - **Each stance phase:** levelled, set at surface height and slid fully
     onto its tread. Offsets blend over swings, and the torso gets the mean
     foot offset.
-  - **Leg IK:** damped least squares on the 5 leg joints.
-  - **Swing-clearance lift**, then the legs are re-solved.
+  - **Leg IK:** damped least squares on the 5 leg joints. Each frame starts
+    with the knee bent at least 0.25 rad, with a small pull towards the warm
+    start; up to 50 iterations.
+  - **Swing-clearance lift**, then the legs are re-solved. The total lift
+    ramps at most 1 m/s, from 0 at lift-off back to 0 at touchdown.
+  - **IK fix (2026-11-06):** the first version made joint jumps in about 1,100
+    passing clips, up to 1.45 rad in one frame (stairs up 5.4x their source's
+    peak speed). Causes:
+    - the lift switched on at up to 4 m/s, because the toe reaches the next
+      riser in the first swing frame;
+    - at a straight knee the IK has no gradient along the leg, so the knee
+      stuck at 0, then snapped.
   - **Stair jogging is dropped:** too few footholds, 18 clips.
 - **`scripts/terrain/jump_pilot.py`:**
   - Box placed under unedited jumps where every foot and shin point clears
     it by 2 cm.
   - Obstacle jumps: 25 cm box (the feet clear about 50 cm). Leaps: 8–12 cm,
     forward leaps only (travel within 30° of the heading).
-- **Result:** `data/terrain/manifest.csv`, 3,417 clips, of which 3,019 pass
-  QA.
-  - QA thresholds:
+- **Result (v2, fixed IK):** `data/terrain/manifest_v2.csv` (written by
+  `scripts/terrain/make_manifest.py`), 2,774 edited clips plus 194 jumps pass
+  (2,968). Edited clips are in `data/terrain/edited_v2/`; the library is
+  `data/library/dash_terrain_v2_compact.pt` (36 tiles). Worst per-clip joint
+  speed, stairs up: 36.5 -> 16.8 rad/s.
+  - **Old (jumpy) set:** `data/terrain/manifest.csv`, `data/terrain/edited/`,
+    `dash_terrain_compact.pt` and `dash_flat_terrain_compact.pt`; 3,019 pass.
+    `dash_t1_blind` was trained on it.
+  - QA thresholds (`make_manifest.py`):
+    - no edit-made joint jumps: each joint's peak speed ≤ 2x its peak in the
+      source + 5 rad/s (v2 only)
     - foot penetration ≤ 4 cm
     - shin penetration ≤ 3 cm
     - stance IK error ≤ 3 cm

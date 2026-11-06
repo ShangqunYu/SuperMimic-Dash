@@ -232,9 +232,17 @@ def foot_offsets(fe, foot_r, stance, old: Profile, new: Profile, margin: float):
     return dc, rv
 
 
-def leg_ik(m, qpos, dc, rv, lift=None, iters: int = 15, rot_w: float = 0.3, damping: float = 1e-3):
+def leg_ik(m, qpos, dc, rv, lift=None, iters: int = 50, rot_w: float = 0.3, damping: float = 1e-3, smooth: float = 1e-3,
+           knee_init: float = 0.25, tol: float = 1e-5):
     """Root += mean foot offset; legs solved so each foot is at its original pose turned by rv about
-    its capsule centre and moved by dc."""
+    its capsule centre and moved by dc.
+
+    Per frame, damped least squares warm-started from the previous frame's solution plus the
+    source motion's change, with a small pull (``smooth``) towards that warm start so redundant
+    directions do not jump. The knee starts at
+    least ``knee_init`` bent: at a straight knee the leg-length direction has no gradient, so a
+    target the straight leg cannot reach left the knee stuck at 0 and then snapping (> 1 rad in
+    one frame) once the solver escaped."""
     from scipy.spatial.transform import Rotation as Rot
 
     d = mujoco.MjData(m)
@@ -261,14 +269,19 @@ def leg_ik(m, qpos, dc, rv, lift=None, iters: int = 15, rot_w: float = 0.3, damp
     out[:, :3] += dc.mean(1)
     resid = np.zeros((T, 2))
     jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
+    knee = LEG.index("knee_pitch")
     for t in range(T):
         if t > 0:  # warm start the legs from the previous solution's change
             for f in range(2):
                 out[t, qadr[f]] += out[t - 1, qadr[f]] - qpos[t - 1, qadr[f]]
+        prev = [out[t, qadr[f]].copy() for f in range(2)]
+        for f in range(2):
+            out[t, qadr[f][knee]] = max(out[t, qadr[f][knee]], knee_init)
         for _ in range(iters):
             d.qpos[:] = out[t]
             mujoco.mj_kinematics(m, d)
             mujoco.mj_comPos(m, d)
+            step = 0.0
             for f in range(2):
                 ep = tgt_p[t, f] - d.xpos[feet[f]]
                 R = d.xmat[feet[f]].reshape(3, 3)
@@ -277,8 +290,12 @@ def leg_ik(m, qpos, dc, rv, lift=None, iters: int = 15, rot_w: float = 0.3, damp
                 mujoco.mj_jacBody(m, d, jp, jr, feet[f])
                 J = np.vstack([jp[:, dadr[f]], rot_w * jr[:, dadr[f]]])
                 e = np.concatenate([ep, rot_w * er])
-                dq = J.T @ np.linalg.solve(J @ J.T + damping * np.eye(6), e)
-                out[t, qadr[f]] = np.clip(out[t, qadr[f]] + dq, rng[f][:, 0], rng[f][:, 1])
+                q = out[t, qadr[f]]
+                dq = np.linalg.solve(J.T @ J + (damping + smooth) * np.eye(len(q)), J.T @ e + smooth * (prev[f] - q))
+                out[t, qadr[f]] = np.clip(q + dq, rng[f][:, 0], rng[f][:, 1])
+                step = max(step, np.abs(dq).max())
+            if step < tol:
+                break
         d.qpos[:] = out[t]
         mujoco.mj_kinematics(m, d)
         for f in range(2):
@@ -286,27 +303,45 @@ def leg_ik(m, qpos, dc, rv, lift=None, iters: int = 15, rot_w: float = 0.3, damp
     return out, resid
 
 
-def swing_lift(prof: Profile, fe, foot_r, stance, clearance: float = 0.015):
-    """(T,2) extra foot height over each swing so the whole sole clears the terrain by ``clearance``.
+def slope_limit(w: np.ndarray, s: float) -> np.ndarray:
+    """Smallest envelope >= w whose change per sample is at most s."""
+    e = w.copy()
+    for i in range(1, len(e)):
+        e[i] = max(e[i], e[i - 1] - s)
+    for i in range(len(e) - 2, -1, -1):
+        e[i] = max(e[i], e[i + 1] - s)
+    return e
 
-    Needed lift per frame (9 points along the sole) -> running max over 0.15 s -> Gaussian
-    smoothing, never below the need; zero in stance."""
+
+def swing_lift(prof: Profile, fe, foot_r, stance, dt: float, base=None, clearance: float = 0.015, max_speed: float = 1.0):
+    """(T,2) foot lift over each swing so the whole sole clears the terrain by ``clearance``.
+
+    ``fe`` is the motion already lifted by ``base`` (zeros if None); returns base plus the extra
+    lift still needed. Needed lift per frame (9 points along the sole) -> running max over 0.15 s
+    -> Gaussian smoothing, never below the need. The total then changes by at most ``max_speed``
+    (m/s), starting from 0 at lift-off and back to 0 at touchdown; zero while standing. Without
+    this the lift switched on at up to 4 m/s (the toe often reaches the next riser in the first
+    swing frame), which the leg IK followed with knee jumps of over 1 rad per frame."""
     from scipy.ndimage import gaussian_filter1d, maximum_filter1d
 
     u = np.linspace(0, 1, 9)[None, None, :, None]
     sole = fe[:, :, :1] * (1 - u) + fe[:, :, 1:] * u
     need = np.clip(prof.h(sole[..., :2]) + clearance - (sole[..., 2] - foot_r), 0, None).max(-1)  # (T,2)
+    base = np.zeros_like(need) if base is None else base
     standing = stance.any(-1)
     lift = np.zeros_like(need)
+    s = max_speed * dt
     for f in range(2):
         lab, n = ndimage.label(~standing[:, f])
         for i in range(1, n + 1):
             idx = np.flatnonzero(lab == i)
             w = need[idx, f]
             if w.max() <= 0:
+                lift[idx, f] = base[idx, f]
                 continue
-            sm = gaussian_filter1d(maximum_filter1d(w, 9, mode="nearest"), 2, mode="constant")
-            lift[idx, f] = np.maximum(sm, w)
+            sm = base[idx, f] + np.maximum(gaussian_filter1d(maximum_filter1d(w, 9, mode="nearest"), 2, mode="constant"), w)
+            k = np.arange(len(idx))
+            lift[idx, f] = np.minimum(slope_limit(sm, s), np.minimum(k + 1, len(idx) - k) * s)
     return lift
 
 
@@ -333,9 +368,18 @@ def scores(prof: Profile, fe, sp, foot_r, shin_r, stance, resid):
     }
 
 
+def joint_speed(q_src: np.ndarray, q_edit: np.ndarray, dt: float) -> dict:
+    """Peak joint speeds of the edit against its source. ``speed_excess`` > 0 means the edit sped
+    some joint up beyond 2x its own peak speed in the source plus 5 rad/s (IK jumps)."""
+    v = (np.abs(np.diff(q_edit[:, 7:], axis=0)) / dt).max(0)
+    v0 = (np.abs(np.diff(q_src[:, 7:], axis=0)) / dt).max(0)
+    return {"joint_speed_max": float(v.max()), "src_joint_speed_max": float(v0.max()), "speed_excess": float((v - 2 * v0 - 5).max())}
+
+
 def fmt(sc):
     return (f"pen {sc['foot_pen_max'] * 100:5.1f}cm ({sc['foot_pen_frac_1cm'] * 100:4.1f}%>1cm) shin {sc['shin_pen_max'] * 100:5.1f}cm  "
-            f"support p5 {sc['support_p5'] * 100:3.0f}% (<80%: {sc['support_lt80'] * 100:4.1f}% fr)  stance ik {sc['ik_resid_stance_max'] * 100:.1f}cm")
+            f"support p5 {sc['support_p5'] * 100:3.0f}% (<80%: {sc['support_lt80'] * 100:4.1f}% fr)  stance ik {sc['ik_resid_stance_max'] * 100:.1f}cm"
+            + (f"  joints {sc['joint_speed_max']:.0f} rad/s (src {sc['src_joint_speed_max']:.0f})" if "joint_speed_max" in sc else ""))
 
 
 def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/terrain_pilot/pilot_meta.csv"), out: Path = Path("logs/terrain_edit"),
@@ -379,7 +423,7 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
             fe2, sp2, _, _ = track(m, q2)
             lift = np.zeros((len(qpos), 2))
             for _ in range(2):  # swing clearance on the edited motion, then re-solve
-                lift += swing_lift(new, fe2, foot_r, stance)
+                lift = swing_lift(new, fe2, foot_r, stance, dt, lift)
                 q2, resid = leg_ik(m, qpos, dc, rv, lift)
                 fe2, sp2, _, _ = track(m, q2)
             stance2 = np.zeros_like(stance)
@@ -387,6 +431,7 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
                 for e in range(2):
                     stance2[:, i, e] = stance_mask(fe2[:, i, e], dt, 0.12, 6) | stance[:, i, e]
             sc1 = scores(new, fe2, sp2, foot_r, shin_r, stance2, resid)
+            sc1.update(joint_speed(qpos, q2, dt))
             print(f"{clip:42s} {desc}\n    before: {fmt(sc0)}\n    after : {fmt(sc1)}")
             rows.append({"clip": clip, "kind": kind, "terrain": desc, **{f"before_{k}": v for k, v in sc0.items()}, **{f"after_{k}": v for k, v in sc1.items()}})
             lo2 = np.minimum(fe2[..., :2].reshape(-1, 2).min(0), q2[:, :2].min(0)) - 0.6
