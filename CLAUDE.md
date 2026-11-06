@@ -256,11 +256,21 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
     - 438 clips fixed (mostly floor sitting), 40 newly failing (sitting, reach
       jump, jog).
     - So flat tracking did not degrade.
-  - **Run `dash_t2_blind_v2`** (started 2026-11-06 ~12:30, GPU 1): fine-tune of t1 40k on
+  - **Run `dash_t2_blind_v2`** (started 2026-11-06 ~12:05, GPU 1): fine-tune of t1 40k on
     the fixed-IK mixed library `data/library/dash_flat_terrain_v2_compact.pt` (67,071
     clips, 2,968 terrain), same flags as t1, 20k iterations. Log `logs/dash_t2_blind_v2.out`.
     `init_from` from a checkpoint with more sampler bins than the library (another terrain
     set) keeps only the leading flat bins.
+- **Physics cleanup test (DSMS, 2026-11-06).** GTI cleans each reference with "Shooting
+  for Contact" (contact-implicit multiple shooting in MuJoCo, IPOPT; public repo, run from a
+  scratchpad clone with a micromamba env, not vendored). Receding horizon on stairs-up clip 101
+  in the training model (PD servos, effort limits), ~32 min per 4.9 s clip on 8 CPU threads.
+  - Paper (soft) contact tracks the reference within 4-6 cm at the root, but the training
+    contact's open-loop replay drifts 0.5 m by 2 s. The training contact tracks poorly (12-15 cm).
+  - Torque: with both the old and the fixed reference, the ankles are at the 35 Nm limit
+    10-16% of the time, hip roll/pitch (50 Nm) 6-31%, knees (80 Nm) 2-16%, mostly in stance.
+    The optimizer barely penalises torque (Rtau 1e-6), so this is an upper bound on need.
+  - Videos `logs/terrain_eval/dsms_up101*_torque.mp4`.
 
 ## Port status (2026-10-27, lab server)
 
