@@ -222,7 +222,22 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
   - **Run `dash_t1_blind`** (started 2026-11-05 ~14:00, GPU 0, shared with other
     users' jobs, ~2 it/s): init from dash_e2_hwdr, mixed library, hardware DR,
     terrain ratio 0.25, lr 1e-4, policy batch 2048, 40k iterations. Log
-    `logs/dash_t1_blind.out`.
+    `logs/dash_t1_blind.out`. Finished 18:25 (4.4 h). WM nse1 0.0055, terrain
+    0.012. It spiked to 0.011 / 0.025 around 16k, then recovered.
+  - **Terrain benchmark** (`eval_terrain.py`, 3,019 clips) failures per checkpoint:
+    e2 2,679; 8k 1,680; 16k 1,247; 24k 255; 32k 116; **40k 58** (mean score 0.733
+    -> 0.814). At 40k:
+    - step up 17/1,647, step down 1/1,074, leaps 7/166, jump off 4/48;
+    - jump on 9/20, stairs down 4/18, **stairs up 8/8 (still all fail)**.
+    - Step-up was learned between 16k and 32k. Before that, failures came at the
+      weight transfer, with the reference torso 11-17 cm past the edge.
+  - **Flat benchmark** (all 64,103 clips from the packed flat library, same
+    protocol for both; scratchpad `flat_bench.py`, results in
+    `logs/terrain_eval/flat_*.json`):
+    - e2: 498 failures, mean 0.8823. t1 40k: **100 failures**, mean 0.8812.
+    - 438 clips fixed (mostly floor sitting), 40 newly failing (sitting, reach
+      jump, jog).
+    - So flat tracking did not degrade.
 
 ## Port status (2026-10-27, lab server)
 
