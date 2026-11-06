@@ -261,6 +261,23 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
     clips, 2,968 terrain), same flags as t1, 20k iterations. Log `logs/dash_t2_blind_v2.out`.
     `init_from` from a checkpoint with more sampler bins than the library (another terrain
     set) keeps only the leading flat bins.
+  - Finished 13:55 (1.8 h, 3.2 it/s). Benchmarks (`logs/terrain_eval/v2/`,
+    `flat_*`, `dr_*`; "rand" = `run_benchmark(randomize=True)`: obs noise, sim and hardware
+    DR, same seed for every policy):
+
+    | | terrain v2 | terrain v2 rand | flat | flat rand |
+    |---|---|---|---|---|
+    | t1 40k | 56, 0.80 | 109, 0.80 | 100, 0.881 | 142, 0.867 |
+    | t2 20k | 32, 0.82 | 41, 0.85 | 174, 0.884 | 218, 0.869 |
+
+    (failures, mean score). t2 is better on terrain (step up 12 -> 2, stairs down 5 -> 2;
+    stairs up still 7/8 fail) and on flat motions other than floor sitting and leaning
+    idles, which account for the extra flat failures (sitting 52 -> 120, rand 60 -> 146).
+  - Train return fell from ~0.5 to ~0 during t2 (t1 stayed ~0.4). It only measures the
+    hardest bins: the sampler gives ~100% of its weight to the top 1% of bins. Over all
+    flat bins t2's bin returns match t1's (mean -0.03).
+  - The restart at lr 1e-4 (t1 ended at 3e-6) costs flat tracking mid-run: at 8k flat mean
+    0.864 (115 failures), recovered by 20k.
 - **Physics cleanup test (DSMS, 2026-11-06).** GTI cleans each reference with "Shooting
   for Contact" (contact-implicit multiple shooting in MuJoCo, IPOPT; public repo, run from a
   scratchpad clone with a micromamba env, not vendored). Receding horizon on stairs-up clip 101

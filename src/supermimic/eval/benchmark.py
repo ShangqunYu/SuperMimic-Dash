@@ -41,8 +41,9 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1", num_clips: int | None = None) -> list[ClipResult]:
-    """``npz_files`` may be one packed .pt library; then ``num_clips`` (its clip count) sizes the env batch."""
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1", num_clips: int | None = None, randomize: bool = False) -> list[ClipResult]:
+    """``npz_files`` may be one packed .pt library; then ``num_clips`` (its clip count) sizes the env batch.
+    ``randomize`` turns on the training randomization (observation noise, sim and hardware DR; same seed for every policy)."""
     packed = len(npz_files) == 1 and str(npz_files[0]).endswith(".pt")
     num_envs = min(num_envs or 1024, num_clips if packed and num_clips else len(npz_files))
     args = SuperMimicEnvCfgArgs(
@@ -52,9 +53,10 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         future_frames=future_frames,
         episode_length_s=1.0e5,  # clip end decides
         action_noise_std=0.0,
-        obs_noise=False,
+        obs_noise=randomize,
         reset_noise=False,
-        domain_randomization=False,
+        domain_randomization=randomize,
+        hardware_dr=randomize,
         sampling_mode="start",
         record_transitions=False,
         seed=0,
