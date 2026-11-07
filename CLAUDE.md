@@ -288,6 +288,20 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
     10-16% of the time, hip roll/pitch (50 Nm) 6-31%, knees (80 Nm) 2-16%, mostly in stance.
     The optimizer barely penalises torque (Rtau 1e-6), so this is an upper bound on need.
   - Videos `logs/terrain_eval/dsms_up101*_torque.mp4`.
+  - **Those peaks are not real demand (2026-11-06).** The 180 Nm knee peak is the optimizer's
+    target zig-zagging past the clip end (horizon > clip); the uncapped 170-190 Nm peaks are
+    shins wedged on step edges. Excluding both, p99 is hip ~65-72, knee ~70, ankle ~75 Nm.
+- **Reference dynamics check (scratchpad `dsms/ref_id.py`):** inverse dynamics of the
+  reference with line-foot contacts (two points per capsule foot, friction cone), contact forces
+  chosen to minimise sum (tau/limit)^2. Hip roll needs only 10-16 Nm p95; ankle p95 ~30 Nm on
+  every clip including flat walking; stairs up hip pitch/knee p95 38-50 Nm.
+  - **Edit bug found:** stairs clips 101/103 (A301) need a ~body-weight "ghost" force for
+    0.12-0.18 s windows: both feet 4-9 cm above any tread while the torso holds height. Cause:
+    the retarget's feet slide 0.15-0.2 m/s on stairs (human stands on the forefoot, heel up; Dash's
+    rigid line foot rolls), so `recover`'s stance (robot foot end still, < 0.12 m/s) ends early;
+    the "swing" lift then raises the loaded foot over the next edge. Human foot contacts
+    (mocap ankle/ball still) are missed as stance on 11-35% of planted frames across stairs and
+    box clips. Fix (not done yet): stance from the human mocap, foot locked during stance.
 
 ## Port status (2026-10-27, lab server)
 
