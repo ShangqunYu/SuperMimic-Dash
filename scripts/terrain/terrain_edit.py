@@ -8,11 +8,16 @@ Motion edit (as in Generate-Track-Improve: foot offsets between contacts, then I
   * every stance phase of a foot gets a constant offset: dz = new - old height of the surface
     it stands on, ds = the slide along d that puts the whole foot on its tread (``margin``
     inside both edges; centred if the tread is shorter than the foot);
+  * stance comes from the robot's still foot ends or the human's (``human_stance``: ankle / ball
+    of the foot still, where the robot's foot end is on a surface); the retarget's own feet
+    slide on stairs, which cut stance short and let the swing lift raise loaded feet; within
+    each stance the resting end is held still (``slide_correction``);
   * offsets blend over the swing between stance phases (smoothstep), the torso moves by the
     mean of both feet's offsets (arms ride along), and a damped least-squares leg IK puts each
     foot at its original pose plus its offset.
-Scores against the edited terrain: foot/shin penetration, the fraction of each standing foot's
-sole that is on a surface (support), and the IK residual.
+Scores against the edited terrain: foot/shin penetration, the fraction of each flat-standing
+foot's sole that is on a surface (support), the IK residual, joint speed against the source, and
+whether the feet can carry the motion (``support_check``, inverse dynamics).
 
   uv run python scripts/terrain/terrain_edit.py --only stairs
 """
@@ -164,13 +169,42 @@ def rot_between(v, w):
     return np.zeros(3) if sn < 1e-9 else ax / sn * np.arctan2(sn, cs)
 
 
-def foot_offsets(fe, foot_r, stance, old: Profile, new: Profile, margin: float):
+def human_stance(mocap, joint_names, fe, dt: float, vmax: float = 0.15, min_len: int = 3) -> np.ndarray:
+    """(T,2,2) stance per robot foot end from the human: the heel end rests while the human ankle
+    joint is still, the toe end while the ball of the foot is. The retarget's own feet slide on
+    stairs (the human stands on the forefoot with the heel up; Dash's rigid line foot rolls), so
+    their speed misses 11-35% of planted frames."""
+    st = np.zeros(fe.shape[:3], dtype=bool)
+    for f, side in enumerate(("Left", "Right")):
+        ankle, ball = mocap[:, joint_names.index(f"{side}Foot")], mocap[:, joint_names.index(f"{side}ToeBase")]
+        heel = int(np.linalg.norm(fe[:, f, 1] - ankle, axis=-1).mean() < np.linalg.norm(fe[:, f, 0] - ankle, axis=-1).mean())
+        st[:, f, heel] = stance_mask(ankle, dt, vmax, min_len)
+        st[:, f, 1 - heel] = stance_mask(ball, dt, vmax, min_len)
+    return st
+
+
+def slide_correction(ends, rest):
+    """ends (n,2,3) capsule ends over one stance phase, rest (n,2) which end rests -> (n,3) shift
+    that holds the resting end(s) still: minus the accumulated displacement of the ends resting in
+    both consecutive frames (the centre if none), centred on its median so the phase keeps its place."""
+    c = np.zeros((len(ends), 3))
+    for t in range(1, len(ends)):
+        both = rest[t - 1] & rest[t]
+        p0 = ends[t - 1][both].mean(0) if both.any() else ends[t - 1].mean(0)
+        p1 = ends[t][both].mean(0) if both.any() else ends[t].mean(0)
+        c[t] = c[t - 1] - (p1 - p0)
+    return c - np.median(c, 0)
+
+
+def foot_offsets(fe, foot_r, stance, old: Profile, new: Profile, margin: float, lock: bool = True):
     """Per foot and frame: capsule-centre offset dc (T,2,3) and rotation offset (T,2,3, rotation vector).
 
     Each stance phase gets one constant offset: the foot is turned about its sideways axis so its
     sole is level (from the frames where heel and toe both rest, else all of the phase), placed
-    at its surface's new height, and slid along d onto its tread (see main docstring). Swings
-    blend between consecutive stance offsets with a smoothstep."""
+    at its surface's new height, and slid along d onto its tread (see main docstring). With
+    ``lock`` the resting end(s) are also held in place over the phase (``slide_correction``): the
+    retarget's feet slide 0.15-0.2 m/s on stairs. Swings blend between the offsets at the end of
+    one stance and the start of the next with a smoothstep."""
     from scipy.spatial.transform import Rotation as Rot
 
     T = fe.shape[0]
@@ -213,11 +247,14 @@ def foot_offsets(fe, foot_r, stance, old: Profile, new: Profile, margin: float):
             else:
                 ds = base + max(0.0, lo - smin) - max(0.0, smax - hi)
             dz = new.heights[j] - sole  # level sole onto the surface
-            keys.append((a, z, np.array([ds * new.d[0], ds * new.d[1], dz]), r))
+            o = np.array([ds * new.d[0], ds * new.d[1], dz])
+            if lock:
+                o = o + slide_correction(fe[a : z + 1, f], stance[a : z + 1, f])
+            keys.append((a, z, o, r))
         if not keys:
             continue
         for arr, k in ((dc, 2), (rv, 3)):
-            arr[: keys[0][0], f] = keys[0][k]
+            arr[: keys[0][0], f] = np.atleast_2d(keys[0][k])[0]
             for i, key in enumerate(keys):
                 a, z, o = key[0], key[1], key[k]
                 arr[a : z + 1, f] = o
@@ -227,8 +264,8 @@ def foot_offsets(fe, foot_r, stance, old: Profile, new: Profile, margin: float):
                     if n > 0:
                         u = (np.arange(1, n + 1) / (n + 1))[:, None]
                         w = u * u * (3 - 2 * u)
-                        arr[z + 1 : a2, f] = (1 - w) * o + w * o2
-            arr[keys[-1][1] + 1 :, f] = keys[-1][k]
+                        arr[z + 1 : a2, f] = (1 - w) * np.atleast_2d(o)[-1] + w * np.atleast_2d(o2)[0]
+            arr[keys[-1][1] + 1 :, f] = np.atleast_2d(keys[-1][k])[-1]
     return dc, rv
 
 
@@ -356,7 +393,9 @@ def scores(prof: Profile, fe, sp, foot_r, shin_r, stance, resid):
     gap = (sole[..., 2] - foot_r) - prof.h(sole[..., :2])
     frac = (np.abs(gap) < 0.02).mean(-1)  # (T,2)
     standing = stance.any(-1)
-    fr = frac[standing]
+    # Support only where the whole foot rests (both ends): with stance from the human, heel-up
+    # forefoot phases rest on the toe end alone by design.
+    fr = frac[stance.all(-1)]
     return {
         "foot_pen_max": float(foot_pen.max()),
         "foot_pen_frac_1cm": float(np.mean(foot_pen.max(axis=(1, 2)) > 0.01)),
@@ -366,6 +405,77 @@ def scores(prof: Profile, fe, sp, foot_r, shin_r, stance, resid):
         "ik_resid_max": float(resid.max()),
         "ik_resid_stance_max": float(resid[standing].max()) if standing.any() else 0.0,
     }
+
+
+def support_check(m, qpos, prof: Profile, dt: float, mu: float = 0.6, frac: float = 0.75) -> dict:
+    """Can the feet carry the motion? Inverse dynamics of qpos (mj_inverse, no sim constraints) with
+    each capsule foot's two sole points (heel and toe end) as contacts in a linearized friction cone
+    (``mu``), active within 2 cm of the surface while the foot is slower than 0.5 m/s. Contact forces
+    (NNLS) supply the root's 6 unactuated rows and minimise sum (tau / limit)^2. The root force they
+    cannot supply is a ghost force: ``ghost_run`` is the longest stretch (s) where it exceeds
+    ``frac`` of the body weight. 0.75 catches floating (both feet off their surfaces while the body
+    falls slower than g / 4: 0.12-0.2 s on stairs-up clips with lifted stance feet) but not the
+    box step-downs, which drop at ~0.3-0.6 g once the retarget loses the trailing toe's contact on
+    the box edge. Flat walking stays below ~0.06 s even at 0.5."""
+    from scipy.optimize import nnls
+    from scipy.signal import savgol_filter
+
+    nq, nv, T = m.nq, m.nv, len(qpos)
+    v = np.zeros((T, nv))
+    for t in range(T):
+        a, b = max(t - 1, 0), min(t + 1, T - 1)
+        mujoco.mj_differentiatePos(m, v[t], (b - a) * dt, qpos[a], qpos[b])
+    win = min(7, T - (1 - T % 2))
+    qvel = savgol_filter(v, win, 2, axis=0)
+    qacc = savgol_filter(v, win, 2, deriv=1, delta=dt, axis=0)
+    import re
+
+    from supermimic.assets.dash.dash import _ACTUATOR_GROUPS
+
+    jdof = np.arange(6, nv)  # the robot XML has no actuators: every hinge is driven
+    names = [m.joint(int(np.flatnonzero(m.jnt_dofadr == i)[0])).name for i in jdof]
+    lim = np.array([next(g[3] for g in _ACTUATOR_GROUPS if any(re.fullmatch(e, n) for e in g[0])) for n in names])
+    feet = [m.geom(f"{s}_foot_collision").id for s in "lr"]
+    E = np.array([[mu, 0, 1], [-mu, 0, 1], [0, mu, 1], [0, -mu, 1]]).T
+    weight = 9.81 * m.body_subtreemass[1]
+    flags = m.opt.disableflags
+    m.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
+    d = mujoco.MjData(m)
+    jacp, vel = np.zeros((3, nv)), np.zeros(6)
+    ghost = np.zeros(T)
+    try:
+        for t in range(T):
+            d.qpos[:], d.qvel[:] = qpos[t], qvel[t]
+            mujoco.mj_forward(m, d)
+            d.qacc[:] = qacc[t]
+            mujoco.mj_inverse(m, d)
+            b = d.qfrc_inverse
+            cols = []
+            for g in feet:
+                r, hl = m.geom_size[g][:2]
+                ax = d.geom_xmat[g].reshape(3, 3)[:, 2]
+                mujoco.mj_objectVelocity(m, d, mujoco.mjtObj.mjOBJ_BODY, m.geom_bodyid[g], vel, 0)
+                if np.linalg.norm(vel[3:]) > 0.5:
+                    continue
+                for sgn in (-1, 1):
+                    p = d.geom_xpos[g] + sgn * hl * ax - np.array([0.0, 0.0, r])
+                    if p[2] - prof.h(p[None, :2])[0] < 0.02:
+                        mujoco.mj_jac(m, d, jacp, None, p, m.geom_bodyid[g])
+                        cols.append(jacp.T @ E)
+            f = np.zeros(nv)
+            if cols:
+                A = np.concatenate(cols, 1)
+                rows = np.vstack([1e3 * A[:6], A[jdof] / lim[:, None], 1e-3 * np.eye(A.shape[1])])
+                rhs = np.concatenate([1e3 * b[:6], b[jdof] / lim, np.zeros(A.shape[1])])
+                f = A @ nnls(rows, rhs, maxiter=2000)[0]
+            ghost[t] = np.linalg.norm(b[:3] - f[:3]) / weight
+    finally:
+        m.opt.disableflags = flags
+    run = best = 0
+    for g in ghost[3:-3] > frac:
+        run = run + 1 if g else 0
+        best = max(best, run)
+    return {"ghost_run": best * dt, "ghost_p95": float(np.percentile(ghost[3:-3], 95))}
 
 
 def joint_speed(q_src: np.ndarray, q_edit: np.ndarray, dt: float) -> dict:
@@ -379,7 +489,8 @@ def joint_speed(q_src: np.ndarray, q_edit: np.ndarray, dt: float) -> dict:
 def fmt(sc):
     return (f"pen {sc['foot_pen_max'] * 100:5.1f}cm ({sc['foot_pen_frac_1cm'] * 100:4.1f}%>1cm) shin {sc['shin_pen_max'] * 100:5.1f}cm  "
             f"support p5 {sc['support_p5'] * 100:3.0f}% (<80%: {sc['support_lt80'] * 100:4.1f}% fr)  stance ik {sc['ik_resid_stance_max'] * 100:.1f}cm"
-            + (f"  joints {sc['joint_speed_max']:.0f} rad/s (src {sc['src_joint_speed_max']:.0f})" if "joint_speed_max" in sc else ""))
+            + (f"  joints {sc['joint_speed_max']:.0f} rad/s (src {sc['src_joint_speed_max']:.0f})" if "joint_speed_max" in sc else "")
+            + (f"  unsupported {sc['ghost_run'] * 1000:.0f} ms" if "ghost_run" in sc else ""))
 
 
 def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/terrain_pilot/pilot_meta.csv"), out: Path = Path("logs/terrain_edit"),
@@ -402,21 +513,27 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
             qpos = to_qpos(dat["q"])[::STEP]
             fe, sp, foot_r, shin_r = track(m, qpos)
             pts, hs, lab, levels, _, stance = recover(fe, foot_r, dt)
+            # Terrain is fitted to the robot's footholds; the edit takes stance from the human too.
+            stance_fit = stance
+            human = human_stance(dat["mocap"][::STEP], list(dat["joint_names"]), fe, dt)
             lo = np.minimum(fe[..., :2].reshape(-1, 2).min(0), qpos[:, :2].min(0)) - 0.6
             hi = np.maximum(fe[..., :2].reshape(-1, 2).max(0), qpos[:, :2].max(0)) + 0.6
             if kind == "stairs":
-                old, par = fit_stairs(pts, hs, fe, sp, foot_r, shin_r, stance)
+                old, par = fit_stairs(pts, hs, fe, sp, foot_r, shin_r, stance_fit)
                 run = max(par["run"], min_run)
                 new = Profile(old.c, old.d, par["e0"] + par["ks"] * run, old.heights)
                 desc = f"stairs rise {par['rise'] * 100:.1f} cm, run {par['run'] * 100:.1f} -> {run * 100:.1f} cm"
             else:
-                old = fit_box(pts, hs, lab, levels, fe, sp, foot_r, shin_r, stance, ((lo[0], hi[0]), (lo[1], hi[1])))
+                old = fit_box(pts, hs, lab, levels, fe, sp, foot_r, shin_r, stance_fit, ((lo[0], hi[0]), (lo[1], hi[1])))
                 if old is None:
                     print(f"{clip}: no box profile, skipped")
                     continue
                 top = old.heights.max()
                 new = Profile(old.c, old.d, old.edges, np.where(old.heights > top / 2, box_height, old.heights))
                 desc = f"box {top * 100:.0f} -> {box_height * 100:.0f} cm"
+            # A still human foot counts only where the robot's foot end is on a recovered surface
+            # (the human sometimes pauses a foot mid-step).
+            stance = stance_fit | (human & (fe[..., 2] - foot_r - old.h(fe[..., :2]) < 0.03))
             sc0 = scores(old, fe, sp, foot_r, shin_r, stance, np.zeros((len(qpos), 2)))
             dc, rv = foot_offsets(fe, foot_r, stance, old, new, margin)
             q2, resid = leg_ik(m, qpos, dc, rv)
@@ -432,6 +549,7 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
                     stance2[:, i, e] = stance_mask(fe2[:, i, e], dt, 0.12, 6) | stance[:, i, e]
             sc1 = scores(new, fe2, sp2, foot_r, shin_r, stance2, resid)
             sc1.update(joint_speed(qpos, q2, dt))
+            sc1.update(support_check(m, q2, new, dt))
             print(f"{clip:42s} {desc}\n    before: {fmt(sc0)}\n    after : {fmt(sc1)}")
             rows.append({"clip": clip, "kind": kind, "terrain": desc, **{f"before_{k}": v for k, v in sc0.items()}, **{f"after_{k}": v for k, v in sc1.items()}})
             lo2 = np.minimum(fe2[..., :2].reshape(-1, 2).min(0), q2[:, :2].min(0)) - 0.6
