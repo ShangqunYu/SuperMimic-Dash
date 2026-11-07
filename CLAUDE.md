@@ -301,7 +301,27 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
     rigid line foot rolls), so `recover`'s stance (robot foot end still, < 0.12 m/s) ends early;
     the "swing" lift then raises the loaded foot over the next edge. Human foot contacts
     (mocap ankle/ball still) are missed as stance on 11-35% of planted frames across stairs and
-    box clips. Fix (not done yet): stance from the human mocap, foot locked during stance.
+    box clips.
+- **Terrain edit v3 (2026-11-06, fixes the above):** stance = robot foot end still OR human
+  ankle/ball still (only where the robot foot end is within 3 cm of a recovered surface; humans
+  pause feet mid-step); in each stance the resting end is held still (`slide_correction`); sole
+  support is scored on flat-foot frames only; new QA `support_check` (inverse dynamics, line-foot
+  contacts): reject when > 3/4 of the body weight is unsupported for > 0.1 s; stance IK bound
+  3 -> 4 cm (a locked trailing foot at full leg extension ends ~3 cm out of reach at lift-off).
+  - **58% of the v2 passing clips float** > 0.1 s by this check (come down 75%, come up 48%,
+    stairs up 4/8). t1/t2 were trained on them.
+  - v3: `data/terrain/manifest_v3.csv` 2,208 edited + 194 jumps pass, all float-free; stairs up
+    12/12, stairs down 14/20, come up 1,393, come down 719 (v2 float-free: 4, 6, 850, 259).
+    Libraries `dash_terrain_v3_compact.pt` (2,402 clips, 38 tiles), `dash_flat_terrain_v3_compact.pt`.
+  - Box step-downs still drop at ~0.3-0.6 g for ~0.3 s (the retarget loses the trailing toe's
+    contact on the box edge); allowed (below 3/4).
+  - Reference inverse dynamics, stairs up v3 (p95 / max Nm): hip roll 14-16 / 21-31, hip pitch
+    35-77 / 108-170, knee 47-62 / 80-89, ankle 31-35 / 36-41; unsupported force p95 37-69 N
+    (walking 48). Hip pitch rises vs v2 because the legs now carry what the ghost force did.
+    Tried: torso following only the placement offsets (not the lock): hip pitch max 175 -> 132
+    but stance IK error 5 cm; not kept.
+  - t2 on v3 terrain: 31/2,402 failures, stairs up 12/12 fail. **Run `dash_t3_blind_v3`**
+    (GPU 1): fine-tune of t2 20k on the v3 mixed library, same flags, 20k iterations.
 
 ## Port status (2026-10-27, lab server)
 

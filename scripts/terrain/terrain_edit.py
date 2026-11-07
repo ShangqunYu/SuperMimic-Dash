@@ -407,7 +407,7 @@ def scores(prof: Profile, fe, sp, foot_r, shin_r, stance, resid):
     }
 
 
-def support_check(m, qpos, prof: Profile, dt: float, mu: float = 0.6, frac: float = 0.75) -> dict:
+def support_check(m, qpos, prof: Profile, dt: float, mu: float = 0.6, frac: float = 0.75, tau_out: list | None = None) -> dict:
     """Can the feet carry the motion? Inverse dynamics of qpos (mj_inverse, no sim constraints) with
     each capsule foot's two sole points (heel and toe end) as contacts in a linearized friction cone
     (``mu``), active within 2 cm of the surface while the foot is slower than 0.5 m/s. Contact forces
@@ -469,6 +469,8 @@ def support_check(m, qpos, prof: Profile, dt: float, mu: float = 0.6, frac: floa
                 rhs = np.concatenate([1e3 * b[:6], b[jdof] / lim, np.zeros(A.shape[1])])
                 f = A @ nnls(rows, rhs, maxiter=2000)[0]
             ghost[t] = np.linalg.norm(b[:3] - f[:3]) / weight
+            if tau_out is not None:  # joint torques (dof order from 6)
+                tau_out.append(b[jdof] - f[jdof])
     finally:
         m.opt.disableflags = flags
     run = best = 0
