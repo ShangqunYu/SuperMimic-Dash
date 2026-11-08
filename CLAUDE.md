@@ -330,6 +330,38 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
       Stairs up are 12 of 66,505 clips (~0.1% of resets at terrain ratio 0.25).
     - Flat (64,103 clips): **134 failures**, mean 0.8883 (t2 174 / 0.8842; t1 100 / 0.8812).
 
+## PARC terrain data (2026-11-08, lab server)
+
+Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SIGGRAPH 2025; MIT):
+`huggingface.co/datasets/mxucg/PARC` `dec_release.zip` (3.9 GB), unzipped at
+`/media/shangqunyu/Dash/parc_src/parc_data/dec_release`; repo (character XML, file format) at
+`/media/shangqunyu/Dash/parc_src/PARC`.
+- Content: 26,396 clips, 29 h at 30 fps (human time). Blocky heightfield, 0.4 m cells.
+  - `initial_aug`: augmentations of the 14 min of mocap (stairs, platform, running, gap jumps,
+    vaulting, climbing).
+  - `*_iter_*`: motions PARC generated and recorded in physics.
+  - ~40% of clips use the hands on terrain (wall climbing); Dash can't.
+  - No hands and stance-level change <= 0.30 m (Dash scale): 7,003 clips, 6.6 h.
+- `scripts/parc/`: `parc_io.py` (load, numpy FK), `parc_retarget.py`, `qa_parc.py`,
+  `render_parc.py` (human | Dash side by side), `survey.py`.
+- `parc_retarget.py`:
+  - Froude scaling: motion and terrain x s = 0.677 (leg ratio), time x sqrt(s), so falls stay at g
+    and footholds stay on their steps.
+  - Per-frame Levenberg-Marquardt IK, warm started, with:
+    - joint and sole targets; hips at Dash's width; feet keep the human footholds;
+    - stance per sole end (human end within 3 cm of terrain and slower than 0.5 m/s), each end
+      locked in xy where it touched down, at the human's height above the human's step;
+    - MuJoCo contact distances vs the terrain boxes;
+    - joint limits by an active set.
+  - Each frame is solved first without terrain, then with it (a warm start can sit behind a step
+    edge).
+  - ~0.02 s/frame on one core.
+- QA of 8 demo clips: penetration <= 1.3 cm, joint speed 17-37 rad/s (one platform clip 66).
+  - Unsupported force p95 0.9-2.2 body weights; flat BONES jogging retargets give 0.5-1.6.
+  - In this check, a sole end supports only if it is within 2 cm of the terrain and moving slower
+    than 0.5 m/s; gating on ankle speed instead dropped running stance.
+  - Videos: `logs/parc/parc_dash_{1,2}.mp4`.
+
 ## Port status (2026-10-27, lab server)
 
 Lab server: 2× RTX PRO 6000 Max-Q, SSD relabelled `Dash` (3.6 TB exFAT, 2026-11-04) at `/media/shangqunyu/Dash`, `uv` at
