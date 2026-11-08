@@ -321,7 +321,14 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
     Tried: torso following only the placement offsets (not the lock): hip pitch max 175 -> 132
     but stance IK error 5 cm; not kept.
   - t2 on v3 terrain: 31/2,402 failures, stairs up 12/12 fail. **Run `dash_t3_blind_v3`**
-    (GPU 1): fine-tune of t2 20k on the v3 mixed library, same flags, 20k iterations.
+    (GPU 1, finished 2026-11-07 ~01:00, 3 h): fine-tune of t2 20k on the v3 mixed library, same
+    flags, 20k iterations.
+    - v3 terrain: **20/2,402 failures** (t2 31; 16 fixed, 5 new, all leaps/jumps), mean 0.852 -> 0.864.
+      Stairs up still **12/12 fail**, but further in: mean progress at failure 61% -> 70% of the clip.
+      Failure mode (rollout `logs/terrain_eval/v3/rollout_dash_t3_blind_v3.mp4`): no fall; the robot
+      stalls on the first steps while the reference climbs on, until the root error terminates.
+      Stairs up are 12 of 66,505 clips (~0.1% of resets at terrain ratio 0.25).
+    - Flat (64,103 clips): **134 failures**, mean 0.8883 (t2 174 / 0.8842; t1 100 / 0.8812).
 
 ## Port status (2026-10-27, lab server)
 
