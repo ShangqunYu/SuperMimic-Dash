@@ -27,6 +27,7 @@ DASH_XML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../src/s
 HUMAN_LEG = 0.421546 + 0.409870
 HUMAN_HIP_Y, HUMAN_SHOULDER_Y = 0.084887, 0.18311
 HEEL, TOE = np.array([-0.0435, 0, -0.05]), np.array([0.1335, 0, -0.05])  # human foot box sole ends
+QD_MAX = 30.0  # rad/s, Dash time; human knees peak ~21 (p90 over clips) in Dash time
 SOLE_ON = 0.03  # a human sole end (human scale) this close to the terrain is "down"
 
 
@@ -213,24 +214,30 @@ def residuals(dash, tg, t, terr, lock, q_prev, jac=True, pen=True):
     return (r, np.vstack(J)) if jac else r
 
 
-def step(A, g, lam, qpos, dash):
-    """Damped step; joints at a limit whose step points out of range are held (active set)."""
+def step(A, g, lam, qpos, lo, hi):
+    """Damped step; joints at a bound whose step points out of range are held (active set)."""
     nv = len(g); free = np.ones(nv, bool)
     for _ in range(3):
         Af = A[np.ix_(free, free)]
         dq = np.zeros(nv)
         dq[free] = -np.linalg.solve(Af + lam * np.diag(np.diag(Af) + 1e-6), g[free])
         q = qpos[7:]
-        out = ((q <= dash.jlo + 1e-6) & (dq[6:] < 0)) | ((q >= dash.jhi - 1e-6) & (dq[6:] > 0))
+        out = ((q <= lo + 1e-6) & (dq[6:] < 0)) | ((q >= hi - 1e-6) & (dq[6:] > 0))
         if not (out & free[6:]).any():
             break
         free[6:] &= ~out
     return dq
 
 
-def solve_frame(dash, tg, t, terr, lock, q_prev, n_iter=15, pen=True):
-    """Levenberg-Marquardt: a step is kept only if it lowers the cost; joint limits by clipping."""
+def solve_frame(dash, tg, t, terr, lock, q_prev, n_iter=15, pen=True, max_step=None):
+    """Levenberg-Marquardt: a step is kept only if it lowers the cost. Joints are bounded by their limits
+    and, with max_step, to within max_step of q_prev (a speed limit: at a hip limit the knee would
+    otherwise flip straight in one frame to reach the foot target)."""
     m, d = dash.m, dash.d
+    lo, hi = dash.jlo, dash.jhi
+    if max_step is not None and q_prev is not None:
+        lo = np.maximum(lo, q_prev[7:] - max_step); hi = np.minimum(hi, q_prev[7:] + max_step)
+        d.qpos[7:] = np.clip(d.qpos[7:], lo, hi)
     lam = 1e-2
     r, Jm = residuals(dash, tg, t, terr, lock, q_prev, pen=pen)
     cost = r @ r
@@ -238,9 +245,9 @@ def solve_frame(dash, tg, t, terr, lock, q_prev, n_iter=15, pen=True):
         g = Jm.T @ r; A = Jm.T @ Jm
         q0 = d.qpos.copy()
         while True:
-            dq = step(A, g, lam, d.qpos, dash)
+            dq = step(A, g, lam, d.qpos, lo, hi)
             mujoco.mj_integratePos(m, d.qpos, dq, 1.0)
-            d.qpos[7:] = np.clip(d.qpos[7:], dash.jlo, dash.jhi)
+            d.qpos[7:] = np.clip(d.qpos[7:], lo, hi)
             r_new = residuals(dash, tg, t, terr, lock, q_prev, jac=False, pen=pen)
             c_new = r_new @ r_new
             if c_new < cost or lam > 1e6:
@@ -269,14 +276,15 @@ def retarget(f):
     d.qpos[3:7] = tg["pelvis_q"][0]
     Q = np.zeros((T, m.nq)); err = np.zeros(T)
     lock = {}
+    ms = QD_MAX / fps
     for t in range(T):
         for key in list(lock):
             if not tg[f"{key[0]}_{key[1]}_down"][t]:
                 lock.pop(key)
         q_prev = Q[t - 1].copy() if t else None
         # free solve first (a warm start can sit behind a step edge the target has passed), then terrain
-        solve_frame(dash, tg, t, terr, lock, q_prev, n_iter=60 if t == 0 else 15, pen=False)
-        err[t] = solve_frame(dash, tg, t, terr, lock, q_prev, n_iter=60 if t == 0 else 15)
+        solve_frame(dash, tg, t, terr, lock, q_prev, n_iter=60 if t == 0 else 15, pen=False, max_step=ms)
+        err[t] = solve_frame(dash, tg, t, terr, lock, q_prev, n_iter=60 if t == 0 else 15, max_step=ms)
         new = False
         mujoco.mj_kinematics(m, d)
         for side in "lr":  # lock each sole end where it touched down
@@ -287,7 +295,7 @@ def retarget(f):
                 if tg[f"{side}_{en}_down"][t] and (side, en) not in lock:
                     lock[(side, en)] = (c + sg * hl * ax)[:2].copy(); new = True
         if new:
-            err[t] = solve_frame(dash, tg, t, terr, lock, q_prev)
+            err[t] = solve_frame(dash, tg, t, terr, lock, q_prev, max_step=ms)
         Q[t] = d.qpos
     return dict(qpos=Q, fps=fps, hf=terr.hf, min_point=terr.p0, dx=terr.dx, scale=s, ik_err=err,
                 contact=np.stack([tg["l_contact"], tg["r_contact"]], 1), other_contact=tg["other_contact"],

@@ -355,12 +355,39 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
     - joint limits by an active set.
   - Each frame is solved first without terrain, then with it (a warm start can sit behind a step
     edge).
-  - ~0.02 s/frame on one core.
+  - Joint speed bound `QD_MAX` 30 rad/s (Dash time) as per-frame joint bounds in the active set.
+    Without it, when the thigh goes past Dash's 90 deg hip flexion limit (high-knee running,
+    vaulting), the knee flips straight in one frame to reach the foot target (up to 140 rad/s;
+    the human knees peak at ~21 rad/s in Dash time, p90 over clips).
+  - ~0.006 s/frame on one core.
 - QA of 8 demo clips: penetration <= 1.3 cm, joint speed 17-37 rad/s (one platform clip 66).
   - Unsupported force p95 0.9-2.2 body weights; flat BONES jogging retargets give 0.5-1.6.
   - In this check, a sole end supports only if it is within 2 cm of the terrain and moving slower
     than 0.5 m/s; gating on ankle speed instead dropped running stance.
   - Videos: `logs/parc/parc_dash_{1,2}.mp4`.
+- Batch (2026-11-08): `batch_retarget.py list out part nparts` (resumable; 16 processes, ~5 min
+  for 7,003 clips), QA with `qa_parc.py` in 16 shards (~2 min).
+  - Selection: hands on terrain in <= 5% of frames and largest stance-level change <= 0.30 m at Dash
+    scale (`survey.py` columns `hand_frac`, `stance_rise` x 0.677): 7,003 clips. 0 retarget failures.
+  - Output `/media/shangqunyu/Dash/parc_dash_30cm/<PARC relative path>.npz` (7.1 GB); QA table
+    `qa/qa_all.csv` (column `keep`), kept list `keep.txt`.
+  - Kept if pen_max <= 2 cm, IK err p95 <= 0.2, ghost p95 <= 2.5 body weights, knee torque p95 <= 100 Nm:
+    6,022 clips, 4.76 h Dash time. By source:
+
+    | Source | Clips kept | Hours kept |
+    |---|---|---|
+    | running | 1,821 / 2,035 | 1.73 |
+    | vaulting (no hands) | 971 / 1,341 | 0.90 |
+    | platform | 801 / 955 | 0.45 |
+    | stairs | 199 / 200 | 0.21 |
+    | jumping | 46 / 62 | 0.05 |
+    | PARC-generated (boxes, siggraph terrain) | 2,184 / 2,408 | 1.40 |
+
+  - Torque demand is still above Dash's limits on many clips: median knee p95 76 Nm (limit 80), median
+    knee peak 175 Nm. Flat BONES jogging gives knee p95 56-73 and peak 63-89 Nm; BONES jumps peak
+    61-141 Nm. Peak joint speed sits at the 30 rad/s bound in most running, platform and vaulting
+    clips (flat BONES: 6-14 rad/s).
+  - Not yet in training: the sim only has box and stair tiles; PARC terrain is a 0.4 m heightfield.
 
 ## Port status (2026-10-27, lab server)
 

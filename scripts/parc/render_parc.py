@@ -47,7 +47,8 @@ def frames(m, qposes, label, dist, lines=None):
 
 def clip_panels(npz):
     z = np.load(npz, allow_pickle=True)
-    m, t = load(str(z["source"]))
+    src = str(z["source"])
+    m, t = load(src if os.path.isabs(src) else os.path.join(os.environ.get("PARC_DATA", "/media/shangqunyu/Dash/parc_src/parc_data/dec_release"), src))
     s = float(z["scale"])
     th = Terrain(t["hf"], t["min_point"], t["dx"]); td = Terrain(z["hf"], z["min_point"], z["dx"])
     hm = human_model(th.boxes()); dm = dash_model(td.boxes())
