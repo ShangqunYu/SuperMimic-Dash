@@ -388,6 +388,12 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
     61-141 Nm. Peak joint speed sits at the 30 rad/s bound in most running, platform and vaulting
     clips (flat BONES: 6-14 rad/s).
   - Not yet in training: the sim only has box and stair tiles; PARC terrain is a 0.4 m heightfield.
+- `render_hq.py out_dir clip.npz ... [--human] [--slow 0.5]`: presentation renders (1920x1080, 60 fps,
+  8x MSAA, 16k shadow map, aluminum robot, camera on the robot's front-left following its smoothed heading).
+  - Shadow/fog notes: a directional light's shadow box is centered on its position, so the key light follows
+    the robot; MuJoCo planes get shadow acne, so the ground is a thin box. Clip, fog and shadow
+    distances are set in meters (`distances()`); MuJoCo takes them as fractions of each model's extent.
+  - Six no-hands clips (2026-11-08): `logs/parc/hq/` (Dash only and `_side` with the human).
 
 ## Port status (2026-10-27, lab server)
 
