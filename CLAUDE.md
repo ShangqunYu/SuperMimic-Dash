@@ -394,6 +394,12 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
     the robot; MuJoCo planes get shadow acne, so the ground is a thin box. Clip, fog and shadow
     distances are set in meters (`distances()`); MuJoCo takes them as fractions of each model's extent.
   - Six no-hands clips (2026-11-08): `logs/parc/hq/` (Dash only and `_side` with the human).
+- `render_strobe.py out_dir clip.npz ... [--n 8] [--every 0.1]`: fixed side camera (15 deg lens, robot
+  travels left to right, frame fits the whole path) for motion-sequence figures. Per clip: 4K video,
+  background, robot cutouts (RGBA, full canvas) and shadow layers every 0.1 s, and composites
+  `sequence_{solid,fade}.png`. Terrain on the camera side of the path is cut away (`section_cut`).
+  Straight-path clips: `survey`/QA filtered, lateral deviation < 0.25 m. Outputs for six clips in
+  `logs/parc/strobe/`.
 
 ## Port status (2026-10-27, lab server)
 
