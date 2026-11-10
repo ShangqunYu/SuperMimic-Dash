@@ -1,0 +1,330 @@
+"""Concept images of Dash on a PARC retarget for slides: perception (height scan, head camera frustum and its
+depth image), decision (candidate and chosen footholds, swing paths, step timing) and motion control (ground
+reaction forces from inverse dynamics, friction cones).
+
+  python render_concepts.py out_dir retarget.npz [--see 24] [--plan 24] [--force 50] [--width 2400 --height 1150]
+
+--see/--plan/--force: the clip frame for each image (Dash fps).
+"""
+import argparse
+import os
+import sys
+
+os.environ.setdefault("MUJOCO_GL", "egl")
+import matplotlib
+import mujoco
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from scipy.optimize import nnls
+from scipy.signal import savgol_filter
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from parc_retarget import Terrain
+from render_hq import dash_model
+
+ACCENT = np.array([0.48, 0.10, 0.20, 1.0])  # maroon, the slide accent
+CAND = np.array([0.20, 0.55, 0.45, 0.9])  # candidate footholds
+INK = (40, 44, 52)
+
+
+def add(scn, typ, size, pos, mat=np.eye(3), rgba=ACCENT):
+    if scn.ngeom >= scn.maxgeom:
+        return
+    g = scn.geoms[scn.ngeom]
+    mujoco.mjv_initGeom(g, typ, np.asarray(size, float), np.asarray(pos, float), np.asarray(mat, float).ravel(), np.asarray(rgba, np.float32))
+    g.emission, g.specular = 0.3, 0.1
+    scn.ngeom += 1
+    return g
+
+
+def line(scn, a, b, width, rgba, typ=mujoco.mjtGeom.mjGEOM_CAPSULE):
+    if scn.ngeom >= scn.maxgeom:
+        return
+    g = add(scn, typ, [0, 0, 0], [0, 0, 0], rgba=rgba)
+    mujoco.mjv_connector(g, typ, width, np.asarray(a, float), np.asarray(b, float))
+    g.emission = 0.3
+
+
+def yaw_frame(q):
+    w, x, y, z = q[3:7]
+    yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    f = np.array([np.cos(yaw), np.sin(yaw), 0.0])
+    return f, np.array([-f[1], f[0], 0.0]), yaw
+
+
+def project(glcam, p, w, h):
+    """World point -> pixel for MuJoCo's OpenGL camera (scene.camera[0])."""
+    pos, fwd, up = np.array(glcam.pos), np.array(glcam.forward), np.array(glcam.up)
+    right = np.cross(fwd, up)
+    v = np.asarray(p) - pos
+    x, y, z = v @ right, v @ up, v @ fwd
+    n = glcam.frustum_near
+    hw = glcam.frustum_width or (glcam.frustum_top - glcam.frustum_bottom) / 2 * w / h  # 0: set by the viewport aspect
+    l, r = glcam.frustum_center - hw, glcam.frustum_center + hw
+    return (x * n / z - l) / (r - l) * w, (glcam.frustum_top - y * n / z) / (glcam.frustum_top - glcam.frustum_bottom) * h
+
+
+class Scene:
+    def __init__(self, z, w, h):
+        self.terr = Terrain(z["hf"], z["min_point"], z["dx"])
+        self.boxes = self.terr.boxes()
+        self.m = dash_model(self.boxes, w, h)
+        self.m.vis.global_.fovy = 30.0
+        self.d = mujoco.MjData(self.m)
+        self.r = mujoco.Renderer(self.m, h, w, max_geom=20000)
+        self.w, self.h = w, h
+        self.full = mujoco.MjvOption(); self.full.geomgroup[:] = 0; self.full.geomgroup[[0, 1, 2]] = 1; self.full.sitegroup[:] = 0
+        self.terrain_only = mujoco.MjvOption(); self.terrain_only.geomgroup[:] = 0; self.terrain_only.geomgroup[[0, 1]] = 1; self.terrain_only.sitegroup[:] = 0
+        self.top = max(b[2] + b[5] for b in self.boxes)
+
+    def pose(self, q):
+        self.d.qpos[:] = q; mujoco.mj_forward(self.m, self.d)
+
+    def cam(self, look, az, el, dist):
+        c = mujoco.MjvCamera(); c.lookat[:], c.azimuth, c.elevation, c.distance = look, az, el, dist
+        key = self.m.light("key").id; kd = self.m.light_dir[key] / np.linalg.norm(self.m.light_dir[key])
+        self.m.light_pos[key] = np.asarray(look) - 20 * kd
+        mujoco.mj_forward(self.m, self.d)  # the renderer reads d.light_xpos: a stale one leaves the shadow box elsewhere (acne)
+        return c
+
+    def shoot(self, cam, extra=None, opt=None):
+        self.r.update_scene(self.d, cam, opt or self.full)
+        self.r.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = 1
+        if extra:
+            extra(self.r.scene)
+        glcam = self.r.scene.camera[0]
+        return Image.fromarray(self.r.render().copy()), glcam
+
+    def surface(self, xy):
+        return self.terr.h(xy)
+
+
+def feet_now(m, d):
+    out = {}
+    for s in "lr":
+        g = m.geom(f"{s}_foot_collision").id
+        ax = d.geom_xmat[g].reshape(3, 3)[:, 2]; b = m.geom_bodyid[g]
+        if np.dot(ax, d.xmat[b].reshape(3, 3)[:, 0]) < 0:
+            ax = -ax
+        out[s] = (d.geom_xpos[g].copy(), ax, m.geom_size[g][0], m.geom_size[g][1])
+    return out
+
+
+def side_cam(S, q, el, dist, ahead=0.6, toward=30.0, dz=-0.15):
+    """Travel to screen right, the camera `toward` deg from the robot's left toward its front."""
+    f, lft, yaw = yaw_frame(q)
+    look = q[:3] + ahead * f + [0, 0, dz]
+    # the camera sits at look - dist (cos az, sin az); on the robot's right: az = yaw + 90, rotated toward the front
+    az = np.degrees(yaw) + 90 - toward
+    return S.cam(look, az, el, dist)
+
+
+def perception(S, Q, t, out):
+    q = Q[t]; S.pose(q)
+    f, lft, _ = yaw_frame(q)
+    torso = S.d.xpos[S.m.body("torso").id]; R = S.d.xmat[S.m.body("torso").id].reshape(3, 3)
+    eye = torso + R @ np.array([0.10, 0.0, 0.40])
+    tgt = q[:3] * [1, 1, 0] + 1.4 * f + [0, 0, S.surface((q[:2] + 1.4 * f[:2])[None])[0]]
+    fwd = tgt - eye; dist = np.linalg.norm(fwd); fwd /= dist
+    fovy, aspect = 58.0, 1.6
+    # height scan: a grid ahead of the robot, coloured by terrain height
+    xs, ys = np.arange(0.15, 3.05, 0.065), np.arange(-0.39, 0.40, 0.065)
+    P = np.array([q[:2] + a * f[:2] + b * lft[:2] for a in xs for b in ys])
+    Z = S.surface(P)
+    cmap = matplotlib.colormaps["viridis"]
+    zn = (Z - Z.min()) / max(np.ptp(Z), 1e-6)
+    up = np.cross(np.cross(fwd, [0, 0, 1]), fwd); up /= np.linalg.norm(up); rt = np.cross(fwd, up)
+    th, tw = np.tan(np.radians(fovy / 2)), np.tan(np.radians(fovy / 2)) * aspect
+
+    def extra(scn):
+        for (x, y), zz, c in zip(P, Z, zn):
+            add(scn, mujoco.mjtGeom.mjGEOM_SPHERE, [0.014, 0, 0], [x, y, zz + 0.012], rgba=[*cmap(0.15 + 0.8 * c)[:3], 1])
+        add(scn, mujoco.mjtGeom.mjGEOM_SPHERE, [0.028, 0, 0], eye, rgba=ACCENT)  # head camera
+
+    cam = side_cam(S, q, -26.0, 4.9, ahead=0.65, toward=35.0)
+    img, _ = S.shoot(cam, extra)
+    img.save(os.path.join(out, "perception_scene.png"))
+    # the head camera's depth image (terrain only)
+    hc = mujoco.MjvCamera(); hc.lookat[:] = tgt; hc.distance = dist
+    hc.azimuth = np.degrees(np.arctan2(fwd[1], fwd[0])); hc.elevation = np.degrees(np.arcsin(fwd[2]))
+    fovy0 = S.m.vis.global_.fovy; S.m.vis.global_.fovy = fovy
+    dh, dw = S.h, int(S.h * aspect) if int(S.h * aspect) <= S.w else S.w
+    rr = mujoco.Renderer(S.m, dh, dw)
+    rr.update_scene(S.d, hc, S.terrain_only); rr.enable_depth_rendering()
+    depth = rr.render().copy(); rr.close()
+    S.m.vis.global_.fovy = fovy0
+    dn = np.clip((depth - 0.5) / (3.4 - 0.5), 0, 1)
+    gy, gx = np.gradient(depth)
+    edge = np.clip(np.hypot(gx, gy) / (np.percentile(np.hypot(gx, gy), 99) + 1e-9), 0, 1)  # risers and step edges
+    rgb = (matplotlib.colormaps["turbo"](1 - dn)[..., :3] * (1 - 0.55 * edge[..., None]) * 255).astype(np.uint8)
+    dimg = Image.fromarray(rgb); dimg.save(os.path.join(out, "perception_depth.png"))
+    # scene with the depth image inset (top right)
+    comp = img.copy(); iw = int(S.w * 0.30); ih = int(iw / aspect)
+    pad = int(S.w * 0.018); x0 = pad; y0 = pad  # top left, over the empty floor behind the robot
+    dr = ImageDraw.Draw(comp)
+    dr.rectangle([x0 - 4, y0 - 4, x0 + iw + 3, y0 + ih + 3], fill=tuple(int(255 * c) for c in ACCENT[:3]))
+    comp.paste(dimg.resize((iw, ih), Image.LANCZOS), (x0, y0))
+    font = ImageFont.truetype("DejaVuSans-Bold.ttf", int(S.h * 0.032))
+    dr.text((x0 + 14, y0 + 10), "depth", fill=(255, 255, 255), font=font)
+    comp.save(os.path.join(out, "perception.png"))
+
+
+def touchdowns(z, Q, m, t0, n):
+    """The next n foot touchdowns after frame t0: (frame, side, foot capsule centre, heel->toe axis)."""
+    d = mujoco.MjData(m); c = z["contact"]; ev = []
+    for t in range(t0 + 1, len(Q)):
+        for k, s in enumerate("lr"):
+            if c[t, k] and not c[t - 1, k]:
+                d.qpos[:] = Q[t]; mujoco.mj_kinematics(m, d)
+                ft = feet_now(m, d)[s]; ev.append((t, s, ft[0], ft[1]))
+    return ev[:n]
+
+
+def decision(S, z, Q, t, out, n=5):
+    q = Q[t]; fps = float(z["fps"])
+    ev = touchdowns(z, Q, S.m, t, n)
+    # swing paths of both feet up to the last shown touchdown
+    d = mujoco.MjData(S.m); paths = {"l": [], "r": []}
+    for k in range(t, ev[-1][0] + 1):
+        d.qpos[:] = Q[k]; mujoco.mj_kinematics(S.m, d)
+        for s, v in feet_now(S.m, d).items():
+            paths[s].append(v[0] - [0, 0, v[2]])
+    S.pose(q)
+    f, lft, _ = yaw_frame(q)
+    # candidate footholds: a grid on every surface ahead, kept off the edges (all four neighbours level)
+    xs, ys = np.arange(0.25, 2.9, 0.07), np.arange(-0.30, 0.31, 0.07)
+    cand = []
+    for a in xs:
+        for b in ys:
+            p = q[:2] + a * f[:2] + b * lft[:2]
+            h0 = S.surface(p[None])[0]
+            nb = S.surface(np.array([p + e for e in ([0.06, 0], [-0.06, 0], [0, 0.06], [0, -0.06])]))
+            if np.all(np.abs(nb - h0) < 1e-6):
+                cand.append([p[0], p[1], h0])
+    cand = np.array(cand)
+    labels = []
+
+    def extra(scn):
+        for p in cand:
+            add(scn, mujoco.mjtGeom.mjGEOM_CYLINDER, [0.012, 0.002, 0], p + [0, 0, 0.002], rgba=CAND)
+        for s in "lr":
+            pts = np.array(paths[s])
+            for a, b in zip(pts[:-1], pts[1:]):
+                line(scn, a, b, 0.006, [0.35, 0.37, 0.42, 0.85])
+        for k, s, c, ax in ev:
+            h0 = S.surface(c[None, :2])[0]
+            yaw = np.arctan2(ax[1], ax[0]); cy, sy = np.cos(yaw), np.sin(yaw)
+            mat = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+            add(scn, mujoco.mjtGeom.mjGEOM_BOX, [0.085, 0.035, 0.004], [c[0], c[1], h0 + 0.005], mat, ACCENT)
+            labels.append((np.array([c[0], c[1], h0 + 0.02]), f"+{(k - t) / fps:.2f} s"))
+        # desired velocity
+        base = q[:3] + [0, 0, 0.62]
+        g = add(scn, mujoco.mjtGeom.mjGEOM_ARROW, [0, 0, 0], [0, 0, 0], rgba=[0.25, 0.27, 0.32, 1])
+        mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_ARROW, 0.022, base, base + 0.55 * f)
+
+    cam = side_cam(S, q, -30.0, 5.0, ahead=1.1, toward=35.0, dz=-0.1)
+    img, glcam = S.shoot(cam, extra)
+    dr = ImageDraw.Draw(img); font = ImageFont.truetype("DejaVuSans-Bold.ttf", int(S.h * 0.028))
+    for p, s in labels:
+        u, v = project(glcam, p, S.w, S.h)
+        tw = dr.textlength(s, font=font)
+        dr.text((u - tw / 2, v + S.h * 0.022), s, fill=tuple(int(255 * c) for c in ACCENT[:3]), font=font,
+                stroke_width=3, stroke_fill=(255, 255, 255))
+    img.save(os.path.join(out, "decision.png"))
+
+
+def contact_forces(m, Q, dt, t, terr, mu=0.6):
+    """Contact forces at frame t from inverse dynamics: the sole ends near the terrain and nearly still each
+    take a force in a linearised friction cone (NNLS), as in qa_parc.support. Returns [(side, point, force)]."""
+    T, nv = len(Q), m.nv
+    v = np.zeros((T, nv))
+    for k in range(T):
+        a, b = max(k - 1, 0), min(k + 1, T - 1)
+        mujoco.mj_differentiatePos(m, v[k], (b - a) * dt, Q[a], Q[b])
+    qvel = savgol_filter(v, 7, 2, axis=0); qacc = savgol_filter(v, 7, 2, deriv=1, delta=dt, axis=0)
+    m.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
+    d = mujoco.MjData(m); d.qpos[:], d.qvel[:] = Q[t], qvel[t]
+    mujoco.mj_forward(m, d); d.qacc[:] = qacc[t]; mujoco.mj_inverse(m, d)
+    m.opt.disableflags &= ~int(mujoco.mjtDisableBit.mjDSBL_CONSTRAINT)
+    b = d.qfrc_inverse.copy()
+    E = np.array([[mu, 0, 1], [-mu, 0, 1], [0, mu, 1], [0, -mu, 1]]).T
+    jacp = np.zeros((3, nv)); pts, cols, sides = [], [], []
+    for s, (c, ax, r, hl) in feet_now(m, d).items():
+        g = m.geom(f"{s}_foot_collision").id
+        for sgn in (-1, 1):
+            p = c + sgn * hl * ax - [0, 0, r]
+            mujoco.mj_jac(m, d, jacp, None, p, m.geom_bodyid[g])
+            if p[2] - terr.h(p[None, :2])[0] < 0.02 and np.linalg.norm(jacp @ qvel[t]) < 0.5:
+                pts.append(p); cols.append(jacp.T @ E); sides.append(s)
+    if not pts:
+        return [], d
+    A = np.concatenate(cols, 1)
+    lam = nnls(np.vstack([A[:6], 1e-3 * np.eye(A.shape[1])]), np.concatenate([b[:6], np.zeros(A.shape[1])]), maxiter=2000)[0]
+    return [(s, p, E @ lam[4 * i:4 * i + 4]) for i, (s, p) in enumerate(zip(sides, pts))], d
+
+
+def control(S, z, Q, t, out, mu=0.6, view=(-14.0, 3.2, 25.0)):
+    dt = 1.0 / float(z["fps"])
+    F, _ = contact_forces(S.m, Q, dt, t, S.terr, mu)
+    S.pose(Q[t])
+    weight = 9.81 * S.m.body_subtreemass[1]
+    com = S.d.subtree_com[1].copy()
+    # one arrow per foot, at its centre of pressure
+    feet = []
+    for s in "lr":
+        ps = [(p, f) for side, p, f in F if side == s]
+        if ps:
+            fz = np.array([max(f[2], 1e-6) for _, f in ps])
+            feet.append((sum(w * p for w, (p, _) in zip(fz, ps)) / fz.sum(), sum(f for _, f in ps)))
+    print("contact forces (body weights):", [round(float(np.linalg.norm(f) / weight), 2) for _, f in feet])
+    grey = [0.30, 0.32, 0.37, 1]
+
+    def cones(scn):
+        for p, _ in feet:
+            hc = 0.24; rr = mu * hc
+            ring = [p + [rr * np.cos(a), rr * np.sin(a), hc] for a in np.linspace(0, 2 * np.pi, 33)]
+            for k, a in enumerate(ring[:-1]):
+                if k % 2 == 0:
+                    line(scn, p, a, 0.0025, [0.35, 0.37, 0.42, 0.55])
+                line(scn, a, ring[k + 1], 0.003, [0.35, 0.37, 0.42, 0.7])
+
+    def arrows(scn):
+        for p, fv in feet:
+            g = add(scn, mujoco.mjtGeom.mjGEOM_ARROW, [0, 0, 0], [0, 0, 0], rgba=ACCENT)
+            mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_ARROW, 0.026, p + [0, 0, 0.004], p + [0, 0, 0.004] + 0.42 * fv / weight)
+        add(scn, mujoco.mjtGeom.mjGEOM_SPHERE, [0.04, 0, 0], com, rgba=grey)
+        g = add(scn, mujoco.mjtGeom.mjGEOM_ARROW, [0, 0, 0], [0, 0, 0], rgba=grey)
+        mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_ARROW, 0.02, com, com - [0, 0, 0.42])
+
+    el, dist, toward = view
+    cam = side_cam(S, Q[t], el, dist, ahead=0.1, toward=toward, dz=-0.2)
+    img, _ = S.shoot(cam, lambda scn: (cones(scn), arrows(scn)))
+    # x-ray pass: the arrows alone on black, pasted over the robot so the legs do not hide them
+    none = mujoco.MjvOption(); none.geomgroup[:] = 0; none.sitegroup[:] = 0
+    S.r.update_scene(S.d, cam, none)
+    for f in (mujoco.mjtRndFlag.mjRND_SKYBOX, mujoco.mjtRndFlag.mjRND_FOG, mujoco.mjtRndFlag.mjRND_SHADOW):
+        S.r.scene.flags[f] = 0
+    arrows(S.r.scene)
+    ov = S.r.render().astype(np.float32)
+    a = np.clip(ov.max(-1, keepdims=True) / 60.0, 0, 1)
+    over = np.clip(ov / np.maximum(a, 1e-3), 0, 255)
+    base = np.asarray(img).astype(np.float32)
+    Image.fromarray((base * (1 - a) + over * a).astype(np.uint8)).save(os.path.join(out, "motion_control.png"))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("out"); ap.add_argument("clip")
+    ap.add_argument("--see", type=int, default=24); ap.add_argument("--plan", type=int, default=24); ap.add_argument("--force", type=int, default=50)
+    ap.add_argument("--width", type=int, default=2400); ap.add_argument("--height", type=int, default=1150)
+    a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
+    z = np.load(a.clip, allow_pickle=True); Q = z["qpos"]
+    S = Scene(z, a.width, a.height)
+    perception(S, Q, a.see, a.out)
+    decision(S, z, Q, a.plan, a.out)
+    control(S, z, Q, a.force, a.out)
+    print("wrote", a.out)
+
+
+if __name__ == "__main__":
+    main()

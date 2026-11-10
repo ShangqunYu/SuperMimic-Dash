@@ -398,8 +398,16 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
   travels left to right, frame fits the whole path) for motion-sequence figures. Per clip: 4K video,
   background, robot cutouts (RGBA, full canvas) and shadow layers every 0.1 s, and composites
   `sequence_{solid,fade}.png`. Terrain on the camera side of the path is cut away (`section_cut`).
-  Straight-path clips: `survey`/QA filtered, lateral deviation < 0.25 m. Outputs for six clips in
-  `logs/parc/strobe/`.
+  Straight-path clips: `survey`/QA filtered, lateral deviation < 0.25 m. Outputs in `logs/parc/strobe/`
+  (32 clips). Smooth-clip pick: median forward speed >= 1.3 m/s, max joint accel <= ~650 rad/s^2, no
+  backtracking, heading within ~20 deg of the path (else the robot turns toward or away from the camera).
+  Mocap-derived `initial_aug` clips are the smoothest; PARC-generated ones pause and jitter more.
+- `render_concepts.py out_dir clip.npz [--see 24 --plan 24 --force 50]`: slide concept images on one clip:
+  perception (height scan + head-camera depth inset), decision (candidate footholds, chosen footsteps
+  with timing, swing paths), motion control (per-foot ground reaction force at the center of pressure
+  from inverse dynamics, friction cones, CoM and gravity; arrows drawn in an x-ray pass over the robot).
+  Set `m.light_pos` then call `mj_forward` before rendering: the renderer reads `d.light_xpos`, and a
+  stale one puts the shadow box elsewhere (acne). Outputs: `logs/parc/concepts/` (stairs_001 aug36).
 
 ## Port status (2026-10-27, lab server)
 
