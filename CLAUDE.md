@@ -388,6 +388,19 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
     61-141 Nm. Peak joint speed sits at the 30 rad/s bound in most running, platform and vaulting
     clips (flat BONES: 6-14 rad/s).
   - Not yet in training: the sim only has box and stair tiles; PARC terrain is a 0.4 m heightfield.
+- `jump_feas.py out.csv clip.npz ...` (2026-11-10): one row per flight phase (both feet off >= 0.12 s): flight time,
+  CoM travel and rise, ballistic takeoff speed, CoM accel from a parabola fit (`az_fit_g`), leg torque / effort
+  limit in the 0.2 s before takeoff (`to_*`) and after landing (`land_*`). Also reads flat BONES npz. The
+  inverse-dynamics ghost force in the air is smoothing bleed (7-frame savgol over ~7-frame flights): ignore it.
+  - Results in `qa/flights.csv` (6,022 kept clips, 17,169 flights) and `qa/flights_bones400.csv` (400 flat BONES
+    jog/jump clips as the baseline; a tracker follows those). PARC needs far more than BONES: takeoff speed median
+    2.9-3.8 m/s (BONES 1.7-2.2), takeoff torque ratio median 1.6-2.3 (BONES 1.2-1.4), clip leg-torque p95 ratio
+    median 0.96 (BONES 0.56). Ankles (35 Nm) bind first. Big flights (travel >= 0.9 m or rise >= 0.15 m: 2,300
+    clips) median 3.9 m/s and 2.9x limit at takeoff. Froude scaling keeps the human's relative effort; parkour
+    humans are relatively stronger than Dash.
+  - `qa/feasible_strict.txt` (every flight within takeoff_v <= 3.0, to_leg <= 1.8, land_leg <= 2.0, about the BONES
+    p90): 1,129 clips, 0.74 h. `qa/feasible_loose.txt` (3.5 / 2.2 / 2.4): 1,866 clips, 1.22 h. Jumping and
+    vaulting nearly all fail; stairs and PARC-generated terrain clips survive best.
 - `render_hq.py out_dir clip.npz ... [--human] [--slow 0.5]`: presentation renders (1920x1080, 60 fps,
   8x MSAA, 16k shadow map, aluminum robot, camera on the robot's front-left following its smoothed heading).
   - Shadow/fog notes: a directional light's shadow box is centered on its position, so the key light follows

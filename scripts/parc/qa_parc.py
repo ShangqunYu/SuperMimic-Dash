@@ -56,44 +56,51 @@ def support(m, Q, terr, dt, tau_out, mu=0.6, frac=0.75):
     run = best = 0
     for g in ghost[3:-3] > frac:
         run = run + 1 if g else 0; best = max(best, run)
-    return {"ghost_run": best * dt, "ghost_p95": float(np.percentile(ghost[3:-3], 95))}
+    return {"ghost_run": best * dt, "ghost_p95": float(np.percentile(ghost[3:-3], 95)), "ghost": ghost}
 
 
 GROUPS = {"hip_roll": 50, "hip_pitch": 50, "knee_pitch": 80, "ankle_pitch": 35}
-rows = []
-for f in sys.argv[2:]:
-    z = np.load(f, allow_pickle=True)
-    terr = Terrain(z["hf"], z["min_point"], z["dx"])
-    m = model(terr.boxes()); d = mujoco.MjData(m)
-    tg = {m.geom(i).id for i in range(m.ngeom) if m.geom(i).name.startswith("terrain_")}
-    Q, dt = z["qpos"], 1.0 / float(z["fps"])
-    pen = np.zeros(len(Q)); slide = []
-    feet = [m.geom(f"{s}_foot_collision").id for s in "lr"]
-    prev = None
-    for t, q in enumerate(Q):
-        d.qpos[:] = q; mujoco.mj_forward(m, d)
-        for c in d.contact[:d.ncon]:
-            if (c.geom1 in tg) != (c.geom2 in tg):
-                pen[t] = max(pen[t], -c.dist)
-        fc = np.array([d.geom_xpos[g][:2] for g in feet])
-        if prev is not None:
-            for k in range(2):
-                if z["contact"][t, k] and z["contact"][t - 1, k]:
-                    slide.append(np.linalg.norm(fc[k] - prev[k]) / dt)
-        prev = fc
-    tau = []
-    m0 = mujoco.MjModel.from_xml_path(DASH_XML)
-    sc = support(m0, Q, terr, dt, tau)
-    tau = np.abs(np.array(tau))
-    jn = [m0.joint(int(np.flatnonzero(m0.jnt_dofadr == i)[0])).name for i in range(6, m0.nv)]
-    qd = np.abs(np.diff(Q[:, 7:], axis=0)) / dt
-    r = dict(clip=os.path.basename(f), seconds=round(len(Q) * dt, 2), pen_max=round(pen.max(), 3), pen_p95=round(np.percentile(pen, 95), 3),
-             slide_p95=round(np.percentile(slide, 95), 3) if slide else 0, ghost_run=round(sc["ghost_run"], 3), ghost_p95=round(sc["ghost_p95"], 2),
-             qd_max=round(qd.max(), 1), ik_err_p95=round(float(np.percentile(z["ik_err"], 95)), 3))
-    for g, lim in GROUPS.items():
-        ks = [i for i, n in enumerate(jn) if n.endswith(g)]
-        a = tau[3:-3, ks].ravel()
-        r[f"{g}_p95"] = round(np.percentile(a, 95)); r[f"{g}_max"] = round(a.max())
-    rows.append(r); print(r)
-with open(sys.argv[1], "w", newline="") as fh:
-    w = csv.DictWriter(fh, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+
+
+def main():
+    rows = []
+    for f in sys.argv[2:]:
+        z = np.load(f, allow_pickle=True)
+        terr = Terrain(z["hf"], z["min_point"], z["dx"])
+        m = model(terr.boxes()); d = mujoco.MjData(m)
+        tg = {m.geom(i).id for i in range(m.ngeom) if m.geom(i).name.startswith("terrain_")}
+        Q, dt = z["qpos"], 1.0 / float(z["fps"])
+        pen = np.zeros(len(Q)); slide = []
+        feet = [m.geom(f"{s}_foot_collision").id for s in "lr"]
+        prev = None
+        for t, q in enumerate(Q):
+            d.qpos[:] = q; mujoco.mj_forward(m, d)
+            for c in d.contact[:d.ncon]:
+                if (c.geom1 in tg) != (c.geom2 in tg):
+                    pen[t] = max(pen[t], -c.dist)
+            fc = np.array([d.geom_xpos[g][:2] for g in feet])
+            if prev is not None:
+                for k in range(2):
+                    if z["contact"][t, k] and z["contact"][t - 1, k]:
+                        slide.append(np.linalg.norm(fc[k] - prev[k]) / dt)
+            prev = fc
+        tau = []
+        m0 = mujoco.MjModel.from_xml_path(DASH_XML)
+        sc = support(m0, Q, terr, dt, tau)
+        tau = np.abs(np.array(tau))
+        jn = [m0.joint(int(np.flatnonzero(m0.jnt_dofadr == i)[0])).name for i in range(6, m0.nv)]
+        qd = np.abs(np.diff(Q[:, 7:], axis=0)) / dt
+        r = dict(clip=os.path.basename(f), seconds=round(len(Q) * dt, 2), pen_max=round(pen.max(), 3), pen_p95=round(np.percentile(pen, 95), 3),
+                 slide_p95=round(np.percentile(slide, 95), 3) if slide else 0, ghost_run=round(sc["ghost_run"], 3), ghost_p95=round(sc["ghost_p95"], 2),
+                 qd_max=round(qd.max(), 1), ik_err_p95=round(float(np.percentile(z["ik_err"], 95)), 3))
+        for g, lim in GROUPS.items():
+            ks = [i for i, n in enumerate(jn) if n.endswith(g)]
+            a = tau[3:-3, ks].ravel()
+            r[f"{g}_p95"] = round(np.percentile(a, 95)); r[f"{g}_max"] = round(a.max())
+        rows.append(r); print(r)
+    with open(sys.argv[1], "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+
+
+if __name__ == "__main__":
+    main()
