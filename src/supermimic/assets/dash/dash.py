@@ -81,13 +81,14 @@ def get_spec(xml: Path = DASH_XML) -> mujoco.MjSpec:
     return spec
 
 
-# WARNING: effort limits and armature are ESTIMATES (scaled from robot mass, not motor
-# datasheets); see mjlab_dash's dash_constants.py. Grouped by physical motor, not by limb:
-# hip yaw/roll/pitch and shoulder_pitch share one motor, the knee has its own higher-torque
-# one, the ankle and the other arm joints their own.
-EFFORT_LIMIT_HIP = 50.0
-EFFORT_LIMIT_KNEE = 80.0
-EFFORT_LIMIT_ANKLE = 35.0
+# WARNING: armature and the arm effort limit are ESTIMATES (scaled from robot mass, not motor
+# datasheets); see mjlab_dash's dash_constants.py. Leg limits are hardware peak torques at the
+# raised motor current (2026-11-10; were 50 / 80 / 35 estimates). Grouped by physical motor,
+# not by limb: hip yaw/roll/pitch and shoulder_pitch share one motor, the knee has its own
+# higher-torque one, the ankle and the other arm joints their own.
+EFFORT_LIMIT_HIP = 80.0
+EFFORT_LIMIT_KNEE = 120.0
+EFFORT_LIMIT_ANKLE = 45.0
 EFFORT_LIMIT_ARM = 30.0
 ARMATURE = 0.01
 

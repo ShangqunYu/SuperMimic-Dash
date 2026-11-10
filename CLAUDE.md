@@ -60,7 +60,9 @@ other Python packages on its path.
 - **PD gains:**
   - 80/2 on every leg joint and on shoulder_pitch (it shares the hip motor).
   - 40/1 on shoulder_roll, shoulder_yaw and elbow.
-- **Effort limits and armature are estimates.** See `dash_constants.py`.
+- **Effort limits:** leg motors at the hardware peak with raised current since 2026-11-10: hip group (hip
+  yaw/roll/pitch, shoulder_pitch) 80, knee 120, ankle 45 Nm (were estimates 50 / 80 / 35; results dated before
+  then used those). Arm limit 30 Nm and armature are still estimates, see `dash_constants.py`.
 
 ## Dataset (BONES-SEED → Dash), built 2026-10-26/27
 
@@ -404,10 +406,13 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
   - Raised peak limits (2026-11-10, `--effort hip=80 knee=120 ankle=45`: more motor current): `qa/flights_peak.csv`,
     `qa/flights_bones400_peak.csv`. Same thresholds on the new ratios (the reference-vs-tracker bias is a property
     of the method, not the limits): `qa/feasible_strict_peak.txt` 1,569 clips 1.03 h, `feasible_loose_peak.txt`
-    2,547 clips 1.71 h, `feasible_torque_peak.txt` (strict torque, no takeoff speed cap) 3,663 clips 2.72 h.
-    Flights over the torque bars drop from 45% to 15% (takeoff) and 24% to 4% (landing); the 3.0 m/s takeoff speed
-    cap (68% of flights over) now binds. The ankle (+29% only) binds on about two thirds of flights. Big flights
-    pass the torque bars 13% -> 39%. Current raises torque, not top speed, so the speed cap stays.
+    2,547 clips 1.71 h (both with the 3.0 m/s takeoff cap, which 68% of flights exceed). Flights over the torque
+    bars drop from 45% to 15% (takeoff) and 24% to 4% (landing). The ankle (+29% only) binds on about two thirds
+    of flights. Big flights pass the torque bars 13% -> 39%.
+  - Takeoff cap raised to 5.0 m/s (hardware can go faster; no flight exceeds 4.6, so torque alone filters):
+    `qa/feasible_strict_peak5.txt` (1.8 / 2.0) 3,663 clips 2.72 h, `qa/feasible_loose_peak5.txt` (2.2 / 2.4)
+    4,681 clips 3.58 h. Strict passes 39% of big flights, loose 59%. These are the training lists. dash.py now
+    holds the peak limits, so jump_feas without `--effort` gives the same ratios.
 - `render_hq.py out_dir clip.npz ... [--human] [--slow 0.5]`: presentation renders (1920x1080, 60 fps,
   8x MSAA, 16k shadow map, aluminum robot, camera on the robot's front-left following its smoothed heading).
   - Shadow/fog notes: a directional light's shadow box is centered on its position, so the key light follows
