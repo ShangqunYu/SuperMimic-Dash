@@ -36,7 +36,8 @@ from supermimic.envs.actions import NoisyJointPositionActionCfg
 from supermimic.envs.mdp import observations as sm_obs
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
-from supermimic.terrain.tiles import load_tiles, terrain_entity_cfg
+from supermimic.terrain.terrains import load_terrains
+from supermimic.terrain.tiles import terrain_entity_cfg
 from supermimic.robots import get_robot
 
 class QuietSimulationCfg(SimulationCfg):
@@ -80,12 +81,18 @@ class SuperMimicEnvCfgArgs:
     bin_frames: int = 50
     compact_library: bool = False
     anchor_obs: bool = False  # add BeyondMimic anchor-relative pose (9) to the goal group (plan D5 alt.)
+    # Teacher: the terrain scan around the robot (terrain/height_scan.py POLICY_GRID) appended to the goal
+    # group, after the anchor terms. Needs a terrain library.
+    policy_scan: bool = False
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/play.py)
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     robot = get_robot(a.robot)
+    terrains = load_terrains(a.npz_files[0]) if len(a.npz_files) == 1 else None
+    if a.policy_scan and terrains is None:
+        raise ValueError("policy_scan needs a terrain library")
     # ---------------------------------------------------------------- observations
     noise = (lambda lo, hi: Unoise(n_min=lo, n_max=hi)) if a.obs_noise else (lambda lo, hi: None)
     policy_terms = {
@@ -112,6 +119,11 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                         "anchor_ori": ObservationTermCfg(func=track_mdp.motion_anchor_ori_b, params={"command_name": "motion"}, noise=noise(-0.05, 0.05)),
                     }
                     if a.anchor_obs
+                    else {}
+                ),
+                **(
+                    {"terrain": ObservationTermCfg(func=sm_obs.policy_terrain, params={"command_name": "motion", "noise": a.obs_noise})}
+                    if a.policy_scan
                     else {}
                 ),
             },
@@ -221,14 +233,17 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         "fall": TerminationTermCfg(func=sm_term.fall, params={"command_name": "motion", "height": a.fall_height, "tilt": a.fall_tilt}),
     }
 
+    if terrains is not None:
+        # Per-env terrain boxes (supermimic/terrain/tiles.py): the slot geoms need per-world size, bounds, pose.
+        events["terrain_slots"] = EventTermCfg(mode="startup", func=sm_obs.expand_terrain_fields)
+
     recorders = {}
-    tiles = load_tiles(a.npz_files[0]) if len(a.npz_files) == 1 else None
     if a.record_transitions:
         recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot.foot_geom_regex, "com_body_name": robot.com_body, "hardware_xi": a.hardware_dr,
-                                                        "terrain_xi": tiles is not None})
+                                                        "terrain_xi": terrains is not None})
 
     cfg = ManagerBasedRlEnvCfg(
-        scene=SceneCfg(terrain=terrain_entity_cfg(tiles), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.command_delay else robot.entity_cfg()}),
+        scene=SceneCfg(terrain=terrain_entity_cfg(terrains.num_slots if terrains is not None else None), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.command_delay else robot.entity_cfg()}),
         observations=observations,
         actions=actions,
         commands=commands,

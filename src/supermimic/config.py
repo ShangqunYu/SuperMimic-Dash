@@ -37,6 +37,9 @@ class EnvCfg:
     future_frames: int = 10
     compact_library: bool = False
     anchor_obs: bool = False
+    # Teacher: the policy also sees the terrain around it (terrain/height_scan.py POLICY_GRID, end of the
+    # goal), in the sim and in imagination. Needs a terrain library.
+    policy_scan: bool = False
 
 
 @dataclass

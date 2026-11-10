@@ -47,15 +47,18 @@ class WorldModel(nn.Module):
         if spec.height_scan:
             from supermimic.terrain.height_scan import HeightScan
 
-            self.scan = HeightScan()  # tiles set with set_terrain(); not part of the state dict
+            self.scan = HeightScan()  # terrains set with set_terrain(); not part of the state dict
+        self.terrains = None
         self.term_head = TerminationHead(cfg.term_hidden, cfg.height_threshold, cfg.tilt_threshold)
         self.heads = heads  # analytic observation / reward / FK (no parameters)
         self.to(device)
 
     # ------------------------------------------------------------------ one step
 
-    def set_terrain(self, tiles) -> None:
-        self.scan.set_tiles(tiles)
+    def set_terrain(self, terrains) -> None:
+        """terrains: a supermimic.terrain.terrains.TerrainSet (index = the terrain column of xi)."""
+        self.terrains = terrains
+        self.scan.set_terrains(terrains)
 
     def context(self, s: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
         """Network context of state s: normalised xi, plus the height scan when terrain is on.

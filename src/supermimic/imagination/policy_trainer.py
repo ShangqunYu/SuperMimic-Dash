@@ -35,6 +35,7 @@ class PolicyTrainerCfg:
     obs_noise: bool = True
     compile: str | None = "default"
     anchor_obs: bool = False  # None | "default" | "reduce-overhead" | "max-autotune-no-cudagraphs"
+    policy_scan: bool = False  # teacher: terrain scan at the end of the goal (set from env.policy_scan)
 
 
 class VelocityImagination:
@@ -53,6 +54,12 @@ class PolicyTrainer:
         from supermimic.imagination.compiled import ImagStep, VelStep
 
         self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile)
+        self.policy_scan = None
+        if cfg.policy_scan:
+            from supermimic.terrain.height_scan import POLICY_GRID, HeightScan
+
+            assert wm.terrains is not None, "policy_scan needs the world model's terrains"
+            self.policy_scan = HeightScan(wm.terrains, POLICY_GRID).to(lib.default_joint_pos.device)
         if velocity is not None:
             self.vel_critic_opt = torch.optim.Adam(velocity.critic.parameters(), lr=cfg.critic_lr)
             self.vel_step_fn = VelStep(wm, lib.default_joint_pos, velocity.cfg, compile_mode=cfg.compile)
@@ -121,7 +128,8 @@ class PolicyTrainer:
         # ---- actor: BPTT through the frozen world model ------------------------------------
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
-        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
+        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs,
+                     policy_scan=self.policy_scan)
         feat, goals, e_root = self._critic_inputs(ro)
         ctx = self.wm.context(ro.states, start.xi)  # (H+1, n, ctx): normalised xi (+ height scan)
         if cfg.use_critic:

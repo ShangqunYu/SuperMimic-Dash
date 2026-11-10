@@ -27,7 +27,8 @@ class PolicyCfg:
     # Fixed goal feature scales: joint_pos NJ, joint_vel NJ, grav 3, ang_vel_b 3, lin_vel_h 3, height 1.
     goal_term_scale: tuple[float, ...] = (1.0, 5.0, 1.0, 2.0, 1.0, 1.0)
     decoder_last_gain: float = 0.01
-    goal_dim: int = 680  # K * (2 NJ + 10) (+9 with anchor_obs); set by the trainer
+    goal_dim: int = 680  # K * (2 NJ + 10) (+9 with anchor_obs) (+ terrain_dim); set by the trainer
+    terrain_dim: int = 0  # teacher terrain scan at the end of the goal (terrain/height_scan.py POLICY_GRID)
     # Velocity interface (paper Appendix B/G): encoder of the normalized command + observation history.
     velocity: bool = False
     velocity_hidden: tuple[int, ...] = (256, 256)
@@ -54,8 +55,8 @@ def _goal_scale_vector(cfg: PolicyCfg, goal_dim: int) -> torch.Tensor:
     nj = cfg.num_joints
     sizes = (nj, nj, 3, 3, 3, 1)
     per_frame = torch.cat([torch.full((n,), 1.0 / s) for n, s in zip(sizes, cfg.goal_term_scale)])
-    k, extra = divmod(goal_dim, goal_feat_dim(nj))
-    return torch.cat([per_frame.repeat(k), torch.ones(extra)])
+    k, extra = divmod(goal_dim - cfg.terrain_dim, goal_feat_dim(nj))  # extra: anchor terms (already scaled)
+    return torch.cat([per_frame.repeat(k), torch.ones(extra + cfg.terrain_dim)])
 
 
 class MotionEncoder(nn.Module):

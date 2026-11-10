@@ -18,7 +18,8 @@ from supermimic.interfaces.velocity import CommandSampler, fall_features, refere
 from supermimic.kinematics.fk import Kinematics
 from supermimic.policy.nets import Critic, Policy, VelocityCritic
 from supermimic.robots import get_robot
-from supermimic.terrain.tiles import load_tiles
+from supermimic.terrain.height_scan import POLICY_SCAN_DIM
+from supermimic.terrain.terrains import load_terrains
 from supermimic.training.distributed import allreduce_mean, broadcast_params, finalize, init_distributed, world_size
 from supermimic.training.schedule import cosine_lr
 from supermimic.world_model.heads import AnalyticHeads
@@ -45,8 +46,10 @@ class Trainer:
         self.cfg = cfg
         self.robot = spec = get_robot(cfg.robot)
         cfg.policy.num_joints = spec.num_joints
-        cfg.policy.goal_dim = cfg.env.future_frames * spec.goal_feat_dim + (9 if cfg.env.anchor_obs else 0)
+        cfg.policy.terrain_dim = POLICY_SCAN_DIM if cfg.env.policy_scan else 0
+        cfg.policy.goal_dim = cfg.env.future_frames * spec.goal_feat_dim + (9 if cfg.env.anchor_obs else 0) + cfg.policy.terrain_dim
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
+        cfg.policy_trainer.policy_scan = cfg.env.policy_scan
         # With hardware DR, its parameters (per joint and per body) enter xi (envs/sim_context.py).
         cfg.world_model.state_spec.xi_hw_bodies = spec.num_bodies if cfg.env.hardware_dr else 0
         vcfg = cfg.velocity
@@ -54,6 +57,7 @@ class Trainer:
         cfg.policy.cmd_scale = vcfg.cmd_scale
         if vcfg.enabled:
             assert not cfg.env.anchor_obs, "velocity interface needs a proprioception-only policy"
+            assert not cfg.env.policy_scan, "velocity interface with a terrain-seeing policy is not supported"
         self.rank, local_rank, self.world = init_distributed()
         self.is_main = self.rank == 0
         if self.world > 1:
@@ -77,9 +81,11 @@ class Trainer:
             files = discover_npz(cfg.data.npz_dir, limit=cfg.data.limit, names=cfg.data.clips, manifest=cfg.data.manifest)
         if not files:
             raise FileNotFoundError(f"no clips under {cfg.data.npz_dir}")
-        # A library with terrain tiles: the world model and critic get a height scan (the policy does not).
-        tiles = load_tiles(files[0]) if len(files) == 1 else None
-        cfg.world_model.state_spec.height_scan = tiles is not None
+        # A library with terrains: the world model and critic get a height scan (the policy only with
+        # env.policy_scan, the teacher).
+        terrains = load_terrains(files[0]) if len(files) == 1 else None
+        cfg.world_model.state_spec.height_scan = terrains is not None
+        assert terrains is not None or not cfg.env.policy_scan, "env.policy_scan needs a terrain library"
         self.env = make_env(
             SuperMimicEnvCfgArgs(
                 npz_files=[str(f) for f in files],
@@ -98,6 +104,7 @@ class Trainer:
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,
+                policy_scan=cfg.env.policy_scan,
                 fall_height=vcfg.fall_height,
                 fall_tilt=vcfg.fall_tilt,
                 seed=cfg.seed + 1000 * self.rank,
@@ -114,8 +121,8 @@ class Trainer:
         fk = Kinematics(spec.load_model(), device=self.device)
         heads = AnalyticHeads(fk, spec.tracked_bodies, spec.anchor_body, spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         self.wm = WorldModel(cfg.world_model, heads, self.device)
-        if tiles is not None:
-            self.wm.set_terrain(tiles)
+        if terrains is not None:
+            self.wm.set_terrain(terrains)
         self.policy = Policy(cfg.policy).to(self.device)
         self.critic = Critic(cfg.critic, pcfg=cfg.policy, xi_dim=self.wm.spec.ctx_dim).to(self.device)
         assert self.buffer.xi.shape[-1] == self.wm.spec.xi_dim, (self.buffer.xi.shape, self.wm.spec.xi_dim)

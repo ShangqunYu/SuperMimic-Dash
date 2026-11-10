@@ -19,6 +19,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
 import torch
 from mjlab.managers import CommandTerm, CommandTermCfg
 from mjlab.utils.lab_api.math import (
@@ -63,15 +64,11 @@ class MultiClipMotionCommand(CommandTerm):
         print(f"[INFO] {self.library.summary()}")
         lib = self.library
 
-        # Terrain clips play on their tile (supermimic/terrain/tiles.py): at reset the env's origin
-        # moves to the tile of the sampled clip, and back to its own flat origin for flat clips.
-        self.flat_origins = env.scene.env_origins.clone()
-        self.tile_origin = None
+        # Terrain clips: at reset the env's own floor and box slots take the sampled clip's terrain
+        # (supermimic/terrain/tiles.py); flat clips get the floor at z = 0 and no boxes.
+        self.terrains = None
         if bool((lib.clip_tile >= 0).any()):
-            from supermimic.terrain.tiles import tile_origins
-
-            n_tiles = int(lib.clip_tile.max().item()) + 1
-            self.tile_origin = torch.as_tensor(tile_origins(n_tiles), dtype=torch.float, device=self.device)
+            self._init_terrain_slots()
 
         n = self.num_envs
         self.frame = torch.zeros(n, dtype=torch.long, device=self.device)
@@ -364,19 +361,46 @@ class MultiClipMotionCommand(CommandTerm):
 
         self._write_reference_state_to_sim(env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel)
 
+    def _init_terrain_slots(self) -> None:
+        from supermimic.terrain.terrains import load_terrains
+        from supermimic.terrain.tiles import FLOOR_HALF, FLOOR_NAME, FLOOR_THICKNESS, SLOT_NAME
+
+        assert len(self.cfg.npz_files) == 1, "terrain clips need a packed library"
+        self.terrains = ts = load_terrains(self.cfg.npz_files[0])
+        assert ts is not None and len(ts) > int(self.library.clip_tile.max()), "library terrains missing"
+        m = self._env.sim.mj_model
+        names = [m.geom(i).name for i in range(m.ngeom)]
+        find = lambda n: next(i for i, g in enumerate(names) if g == n or g.endswith("/" + n))  # noqa: E731
+        k = sum(1 for g in names if "terrain_slot_" in g)
+        ids = [find(FLOOR_NAME)] + [find(SLOT_NAME.format(j)) for j in range(k)]
+        pos, size, floor = ts.slot_arrays(k)
+        n = pos.shape[0]
+        fpos = np.zeros((n, 1, 3), np.float32)
+        fpos[:, 0, 2] = floor - FLOOR_THICKNESS / 2
+        fsize = np.tile(np.array([[[FLOOR_HALF, FLOOR_HALF, FLOOR_THICKNESS / 2]]], np.float32), (n, 1, 1))
+        t = lambda x: torch.as_tensor(x, device=self.device)  # noqa: E731
+        # Row r = terrain r - 1 (row 0 flat), column 0 the floor, then the slots; poses in the terrain frame.
+        self.slot_geoms = torch.tensor(ids, dtype=torch.long, device=self.device)
+        self.slot_pos = t(np.concatenate([fpos, pos], 1))
+        self.slot_size = t(np.concatenate([fsize, size], 1))
+
     def _place_on_terrain(self, env_ids: torch.Tensor, frames: torch.Tensor) -> None:
-        """Move the origins of ``env_ids`` to the tiles of the clips of ``frames`` (flat clips: own origin)."""
-        if self.tile_origin is None:
+        """Give ``env_ids`` the terrains of the clips of ``frames`` (floor + box slots in their own worlds)."""
+        if self.terrains is None or env_ids.numel() == 0:
             return
-        tile = self.library.clip_tile[self.library.frame_clip[frames]]
-        o = self.flat_origins[env_ids].clone()
-        on = tile >= 0
-        o[on] = self.tile_origin[tile[on]]
-        self._env.scene.env_origins[env_ids] = o
+        row = self.library.clip_tile[self.library.frame_clip[frames]] + 1
+        model, data = self._env.sim.model, self._env.sim.data
+        e, g = torch.meshgrid(env_ids, self.slot_geoms, indexing="ij")
+        size, pos = self.slot_size[row], self.slot_pos[row]
+        model.geom_size[e, g] = size
+        model.geom_rbound[e, g] = size.norm(dim=-1)
+        model.geom_aabb[e, g, 1] = size
+        model.geom_pos[e, g] = pos
+        data.geom_xpos[e, g] = pos + self._env.scene.env_origins[env_ids][:, None, :]
 
     @property
     def clip_tile(self) -> torch.Tensor:
-        """(N,) terrain tile of each env's current clip, -1 for flat clips."""
+        """(N,) terrain of each env's current clip, -1 for flat clips."""
         return self.library.clip_tile[self.library.frame_clip[self.frame]]
 
     def update_relative_body_poses(self) -> None:

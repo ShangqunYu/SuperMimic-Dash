@@ -332,6 +332,36 @@ geometry, only prop labels, so the terrain is recovered from Dash's footholds.
       Stairs up are 12 of 66,505 clips (~0.1% of resets at terrain ratio 0.25).
     - Flat (64,103 clips): **134 failures**, mean 0.8883 (t2 174 / 0.8842; t1 100 / 0.8812).
 
+## Teacher with terrain input (2026-11-10, lab server)
+
+Teacher-student plan (user's decision): the teacher policy sees an exact terrain scan and trains in
+imagination; a depth student (mjlab_dash `depth.py` pipeline) will be distilled from it in the sim (DAgger).
+- **Terrains are heightfields** (`terrain/terrains.py`): per terrain `hf`, cell (i, j) centred on
+  `p0 + (i, j) dx`, lookups clamp to edge cells, stored padded by 3 m of edge cells, negative heights
+  allowed (pits; the old `clamp_min(0)` is gone). Physics boxes = equal-height cells merged greedily from the
+  lowest cell (the env's floor top) up. Old box-tile libraries (`.tiles.npz`) load rasterised at 2 cm.
+- **Per-env terrain in the sim** (`terrain/tiles.py`, `MultiClipMotionCommand._place_on_terrain`): every env
+  has a floor box + `num_slots` box slots (max boxes over the set; 66 for PARC). At reset the sampled clip's
+  boxes are written into that env's world: per-world `geom_size/rbound/aabb/pos` (expanded by the startup
+  event `expand_terrain_fields`) and `data.geom_xpos` directly, since mujoco_warp computes static geom poses
+  only once at `put_data`. Env origins all stay at 0; clips are stored in their terrain's frame. The tile
+  grid (`tile_origins`) is gone, so `scripts/terrain/eval_terrain.py` / `check_tiles.py` still assume the old
+  layout and need updating before use on the new library.
+- **Scans** (`terrain/height_scan.py`): `WM_GRID` (world model and critic, as before: absolute height / 0.5)
+  and `POLICY_GRID` (x -0.25..1.25, y +-0.3, 5 cm, 403 points; root height above each point - 0.65, / 0.5,
+  +-2 cm noise with obs noise). `--env.policy-scan` appends it to the goal (env obs term
+  `policy_terrain`, same function in `imagine`), `PolicyCfg.terrain_dim` keeps the goal scales right.
+  Not with the velocity interface.
+- **Library** `data/library/dash_flat_terrain_v3_parc_compact.pt` (`scripts/parc/build_parc_library.py`):
+  v3 mixed library + PARC `feasible_loose_peak5` (4,681 clips, 3.56 h, 4,644 distinct terrains, 50 fps):
+  71,186 clips, 135.1 h, 4,682 terrains (median 9 boxes).
+- Checks (scratchpad `teacher/env_test.py`, 16 envs): slots equal each terrain's boxes, policy scan equals
+  the CPU heightfield lookup, reference replay foot penetration <= 2.4 cm. Smoke run (256 envs, 300 it,
+  from scratch, hardware DR, terrain ratio 0.4, policy scan): runs, ~3 it/s at that size, 4.5 GB host RAM.
+- 2026-11-10: a `read_terrains` bug (re-reading the 64 MB npz array per terrain) took >100 GB host RAM and
+  systemd-oomd killed the GNOME terminal running Claude (and with it the user's desktop session). Run memory
+  heavy tests under `systemd-run --user --scope -p MemoryMax=32G -p MemorySwapMax=0`.
+
 ## PARC terrain data (2026-11-08, lab server)
 
 Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SIGGRAPH 2025; MIT):

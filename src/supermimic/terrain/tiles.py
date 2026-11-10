@@ -1,18 +1,19 @@
-"""Terrain tiles for terrain clips (boxes, stairs, obstacles), as static boxes in the scene.
+"""Scene terrain for terrain libraries: per env, a floor box and ``num_slots`` box slots.
 
-Every terrain clip is stored in its tile's frame (scripts/terrain/build_terrain_library.py): a tile
-is a list of axis-aligned boxes (centre xyz, half sizes) around the tile origin, ground at z = 0.
-Many clips share a tile (all 0.30 m step-ups use one), and since every env is its own MuJoCo world,
-any number of envs can use the same tile at once: an env playing a terrain clip just has its origin
-moved to that tile (MultiClipMotionCommand).
+Every env is its own MuJoCo world, so each env holds its own terrain: at reset MultiClipMotionCommand
+writes the boxes of the sampled clip's terrain (supermimic/terrain/terrains.py) into that env's slots
+and moves its floor to the terrain's lowest cell (per-world geom size, bounds and pose; static geom
+poses live in mjData.geom_xpos, which the physics never recomputes). Unused slots are parked far below.
+Env origins stay where mjlab puts them (all at the world origin with this one-patch terrain), and every
+clip is stored in its terrain's frame. Flat clips (terrain -1) see the floor at z = 0 and no boxes.
 
-World layout: flat clips spawn at the origin (they stay within ~9 m of their start); tiles sit on a
-grid from x = ``TILE_X0`` on, ``TILE_SPACING`` apart, all on one big floor.
+Older libraries store box tiles (``<stem>.tiles.npz``: per tile, boxes on a z = 0 floor); they load
+through terrains.load_terrains.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import mujoco
@@ -20,20 +21,21 @@ import numpy as np
 
 from mjlab.terrains.terrain_generator import SubTerrainCfg, TerrainGeometry, TerrainOutput
 
-TILE_X0 = 30.0
-TILE_SPACING = 16.0
-TILE_COLS = 8
+FLOOR_HALF = 30.0  # m; flat clips travel at most ~9 m from their start
 FLOOR_THICKNESS = 1.0
+WORLD_SIZE = 2 * FLOOR_HALF + 4.0
+FLOOR_NAME = "terrain_floor"
+SLOT_NAME = "terrain_slot_{}"
 
 
 def tiles_path(library: str | Path) -> Path:
-    """Sidecar file next to a packed library holding its tiles (written by build_terrain_library.py)."""
+    """Sidecar of an older packed library holding its box tiles (build_terrain_library.py)."""
     p = Path(library)
     return p.with_name(p.stem + ".tiles.npz")
 
 
 def load_tiles(library: str | Path) -> list[np.ndarray] | None:
-    """Tiles of a packed library, or None for a library without terrain."""
+    """Box tiles of an older packed library, or None."""
     p = tiles_path(library)
     if not str(library).endswith(".pt") or not p.exists():
         return None
@@ -41,54 +43,40 @@ def load_tiles(library: str | Path) -> list[np.ndarray] | None:
     return [z[f"tile_{i}"] for i in range(len(z["names"]))]
 
 
-def tile_origins(n: int) -> np.ndarray:
-    """(n, 3) world origins of n tiles."""
-    i = np.arange(n)
-    return np.stack([TILE_X0 + TILE_SPACING * (i // TILE_COLS), TILE_SPACING * (i % TILE_COLS - (TILE_COLS - 1) / 2), np.zeros(n)], 1)
-
-
-def world_extent(n: int) -> tuple[float, float, float, float]:
-    """(x0, x1, y0, y1) covering the flat spawn area and all tiles, with margin."""
-    o = tile_origins(max(n, 1))
-    m = TILE_SPACING
-    return min(-20.0, o[:, 0].min() - m), max(20.0, o[:, 0].max() + m), min(-20.0, o[:, 1].min() - m), max(20.0, o[:, 1].max() + m)
-
-
 @dataclass(kw_only=True)
-class ClipTilesTerrainCfg(SubTerrainCfg):
-    """One sub-terrain holding the whole world: floor + every tile's boxes.
+class SlotTerrainCfg(SubTerrainCfg):
+    """One sub-terrain: the floor (top at z = 0) and ``num_slots`` parked boxes, rewritten per env.
 
-    Use with TerrainGeneratorCfg(num_rows=1, num_cols=1, size=world size); the generator places the
-    patch corner at -size/2, so geometry is offset by +size/2 to keep the world origin fixed."""
+    Use with TerrainGeneratorCfg(num_rows=1, num_cols=1, size=(WORLD_SIZE, WORLD_SIZE)); the generator places
+    the patch corner at -size/2, so geometry is offset by +size/2 to keep the world origin fixed."""
 
-    tiles: list[np.ndarray] = field(default_factory=list)  # per tile: (B, 6) centre xyz + half sizes
+    num_slots: int = 1
     color: tuple[float, float, float, float] = (0.55, 0.62, 0.72, 1.0)
 
     def function(self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator) -> TerrainOutput:
         del difficulty, rng
+        from supermimic.terrain.terrains import PARK_Z
+
         body = spec.body("terrain")
         sx, sy = self.size
         off = np.array([sx / 2, sy / 2, 0.0])  # patch-corner frame -> world-centred frame
-        geoms = []
-        floor = body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=(sx / 2, sy / 2, FLOOR_THICKNESS / 2), pos=(sx / 2, sy / 2, -FLOOR_THICKNESS / 2))
-        floor.rgba = (0.45, 0.47, 0.5, 1.0)
-        geoms.append(TerrainGeometry(geom=floor, color=(0.45, 0.47, 0.5, 1.0)))
-        for o, boxes in zip(tile_origins(len(self.tiles)), self.tiles):
-            for b in np.asarray(boxes, dtype=float).reshape(-1, 6):
-                g = body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=tuple(b[3:]), pos=tuple(off + o + b[:3]), rgba=self.color)
-                geoms.append(TerrainGeometry(geom=g, color=self.color))
-        return TerrainOutput(origin=off.copy(), geometries=geoms)  # flat clips spawn at the world origin
+        floor_rgba = (0.45, 0.47, 0.5, 1.0)
+        floor = body.add_geom(name=FLOOR_NAME, type=mujoco.mjtGeom.mjGEOM_BOX, size=(FLOOR_HALF, FLOOR_HALF, FLOOR_THICKNESS / 2),
+                              pos=tuple(off + (0.0, 0.0, -FLOOR_THICKNESS / 2)), rgba=floor_rgba)
+        geoms = [TerrainGeometry(geom=floor, color=floor_rgba)]
+        for k in range(self.num_slots):
+            g = body.add_geom(name=SLOT_NAME.format(k), type=mujoco.mjtGeom.mjGEOM_BOX, size=(0.01, 0.01, 0.01), pos=tuple(off + (0.0, 0.0, PARK_Z)), rgba=self.color)
+            geoms.append(TerrainGeometry(geom=g, color=self.color))
+        return TerrainOutput(origin=off.copy(), geometries=geoms)  # every env spawns at the world origin
 
 
-def terrain_entity_cfg(tiles: list[np.ndarray] | None):
-    """Scene terrain: the mjlab plane without tiles, else one generator patch holding floor + tiles."""
+def terrain_entity_cfg(num_slots: int | None):
+    """Scene terrain: the mjlab plane for flat libraries, else floor + ``num_slots`` box slots."""
     from mjlab.terrains import TerrainEntityCfg
     from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 
-    if not tiles:
+    if not num_slots:
         return TerrainEntityCfg(terrain_type="plane")
-    x0, x1, y0, y1 = world_extent(len(tiles))
-    size = (2 * max(abs(x0), abs(x1)), 2 * max(abs(y0), abs(y1)))  # the generator centres the patch on the origin
-    gen = TerrainGeneratorCfg(size=size, num_rows=1, num_cols=1, curriculum=False, color_scheme="none", seed=0,
-                              sub_terrains={"clip_tiles": ClipTilesTerrainCfg(tiles=list(tiles))})
+    gen = TerrainGeneratorCfg(size=(WORLD_SIZE, WORLD_SIZE), num_rows=1, num_cols=1, curriculum=False, color_scheme="none", seed=0,
+                              sub_terrains={"slots": SlotTerrainCfg(num_slots=num_slots)})
     return TerrainEntityCfg(terrain_type="generator", terrain_generator=gen, textures=(), materials=())

@@ -10,6 +10,7 @@ from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.compiled import REWARD_TERM_NAMES, ImagStep
 from supermimic.policy.nets import Policy
+from supermimic.terrain.height_scan import policy_terrain_obs
 from supermimic.world_model.heads import ReferenceFrame, analytic_observation, anchor_relative_obs, flatten_history_term_major
 from supermimic.world_model.wm_trainer import reference_at
 from supermimic.world_model.world_model import WorldModel
@@ -47,7 +48,9 @@ def imagine(
     obs_noise: bool = True,
     step_fn: ImagStep | None = None,
     anchor_obs: bool = False,
+    policy_scan=None,
 ) -> ImagRollout:
+    """policy_scan: a HeightScan on POLICY_GRID for a teacher policy (terrain at the end of its goal)."""
     device = start.state.device
     n = start.state.shape[0]
     q0 = lib.default_joint_pos
@@ -61,14 +64,19 @@ def imagine(
             return o + (torch.rand_like(o) * 2 - 1) * noise_half
         return o
 
-    def make_goal(frame_t, ref_t, anchor_pose):
-        g = lib.goal_window(frame_t, future_frames)
-        if not anchor_obs:
-            return g
-        rel = anchor_relative_obs(anchor_pose[..., 0:3], anchor_pose[..., 3:7], ref_t.body_pos_w[..., ai, :], ref_t.body_quat_w[..., ai, :])
-        if obs_noise:
-            rel = rel + (torch.rand_like(rel) * 2 - 1) * anchor_noise_half
-        return torch.cat([g, rel], dim=-1)
+    tile = wm.spec.tile_of(start.xi) if policy_scan is not None else None
+
+    def make_goal(frame_t, ref_t, anchor_pose, s_t):
+        # Same layout as the env's goal group: future frames, anchor terms, terrain scan.
+        parts = [lib.goal_window(frame_t, future_frames)]
+        if anchor_obs:
+            rel = anchor_relative_obs(anchor_pose[..., 0:3], anchor_pose[..., 3:7], ref_t.body_pos_w[..., ai, :], ref_t.body_quat_w[..., ai, :])
+            if obs_noise:
+                rel = rel + (torch.rand_like(rel) * 2 - 1) * anchor_noise_half
+            parts.append(rel)
+        if policy_scan is not None:
+            parts.append(policy_terrain_obs(policy_scan, s_t, tile, noise=obs_noise))
+        return torch.cat(parts, dim=-1) if len(parts) > 1 else parts[0]
 
     # Initial observation history from the logged states/actions (noise re-sampled per frame).
     hist = [add_noise(analytic_observation(start.hist_states[i], start.hist_actions[i], start.xi, q0)) for i in range(start.hist_states.shape[0])]
@@ -96,7 +104,7 @@ def imagine(
         anchor_pose = torch.cat([b0["pos"][..., ai, :], b0["quat"][..., ai, :]], dim=-1)
     else:
         anchor_pose = None
-    goals = [make_goal(frame, ref, anchor_pose)]
+    goals = [make_goal(frame, ref, anchor_pose, s)]
     e_roots = [wm.heads.root_error_features(s, ref)]
     term_sum = torch.zeros(len(REWARD_TERM_NAMES), device=device)
 
@@ -118,7 +126,7 @@ def imagine(
         rewards.append(r)
         dhats.append(d)
         survivals.append(c)
-        goals.append(make_goal(frame, ref, anchor_pose))
+        goals.append(make_goal(frame, ref, anchor_pose, s))
         e_roots.append(wm.heads.root_error_features(s, ref))
         frames.append(frame)
 
