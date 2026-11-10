@@ -402,9 +402,9 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
   (32 clips). Smooth-clip pick: median forward speed >= 1.3 m/s, max joint accel <= ~650 rad/s^2, no
   backtracking, heading within ~20 deg of the path (else the robot turns toward or away from the camera).
   Mocap-derived `initial_aug` clips are the smoothest; PARC-generated ones pause and jitter more.
-- `render_concepts.py out_dir clip.npz [--see 24 --plan 24 --force 50]`: slide concept images on one clip:
-  perception (height scan + head-camera depth inset), decision (candidate footholds, chosen footsteps
-  with timing, swing paths), motion control (per-foot ground reaction force at the center of pressure
+- `render_concepts.py out_dir clip.npz [--see 24 --plan 42 --force 50]`: slide concept images on one clip:
+  perception (height scan + head-camera depth inset), decision (the next two footholds with timing and
+  the swing paths to them, close-up at the stairs; `candidates=True` adds a candidate-foothold grid), motion control (per-foot ground reaction force at the center of pressure
   from inverse dynamics, friction cones, CoM and gravity; arrows drawn in an x-ray pass over the robot).
   Set `m.light_pos` then call `mj_forward` before rendering: the renderer reads `d.light_xpos`, and a
   stale one puts the shadow box elsewhere (acne). Outputs: `logs/parc/concepts/` (stairs_001 aug36).

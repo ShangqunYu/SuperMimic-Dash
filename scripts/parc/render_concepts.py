@@ -180,56 +180,56 @@ def touchdowns(z, Q, m, t0, n):
     return ev[:n]
 
 
-def decision(S, z, Q, t, out, n=5):
+def decision(S, z, Q, t, out, n=2, candidates=False, view=(-24.0, 3.3, 15.0, 0.5), dz=-0.2):
+    """The next n footholds (where and when) and each foot's swing path to its next one."""
     q = Q[t]; fps = float(z["fps"])
     ev = touchdowns(z, Q, S.m, t, n)
-    # swing paths of both feet up to the last shown touchdown
-    d = mujoco.MjData(S.m); paths = {"l": [], "r": []}
-    for k in range(t, ev[-1][0] + 1):
+    last = {s: k for k, s, _, _ in reversed(ev)}  # each foot's path ends at its first shown touchdown
+    d = mujoco.MjData(S.m); paths = {s: [] for s in last}
+    for k in range(t, max(last.values()) + 1):
         d.qpos[:] = Q[k]; mujoco.mj_kinematics(S.m, d)
         for s, v in feet_now(S.m, d).items():
-            paths[s].append(v[0] - [0, 0, v[2]])
+            if s in last and k <= last[s]:
+                paths[s].append(v[0] - [0, 0, v[2]])
     S.pose(q)
     f, lft, _ = yaw_frame(q)
-    # candidate footholds: a grid on every surface ahead, kept off the edges (all four neighbours level)
-    xs, ys = np.arange(0.25, 2.9, 0.07), np.arange(-0.30, 0.31, 0.07)
     cand = []
-    for a in xs:
-        for b in ys:
-            p = q[:2] + a * f[:2] + b * lft[:2]
-            h0 = S.surface(p[None])[0]
-            nb = S.surface(np.array([p + e for e in ([0.06, 0], [-0.06, 0], [0, 0.06], [0, -0.06])]))
-            if np.all(np.abs(nb - h0) < 1e-6):
-                cand.append([p[0], p[1], h0])
-    cand = np.array(cand)
+    if candidates:  # a grid on every surface ahead, kept off the edges (all four neighbours level)
+        for a_ in np.arange(0.25, 2.9, 0.07):
+            for b_ in np.arange(-0.30, 0.31, 0.07):
+                p = q[:2] + a_ * f[:2] + b_ * lft[:2]
+                h0 = S.surface(p[None])[0]
+                nb = S.surface(np.array([p + e for e in ([0.06, 0], [-0.06, 0], [0, 0.06], [0, -0.06])]))
+                if np.all(np.abs(nb - h0) < 1e-6):
+                    cand.append([p[0], p[1], h0])
     labels = []
 
     def extra(scn):
         for p in cand:
-            add(scn, mujoco.mjtGeom.mjGEOM_CYLINDER, [0.012, 0.002, 0], p + [0, 0, 0.002], rgba=CAND)
-        for s in "lr":
-            pts = np.array(paths[s])
-            for a, b in zip(pts[:-1], pts[1:]):
-                line(scn, a, b, 0.006, [0.35, 0.37, 0.42, 0.85])
+            add(scn, mujoco.mjtGeom.mjGEOM_CYLINDER, [0.012, 0.002, 0], np.asarray(p) + [0, 0, 0.002], rgba=CAND)
+        for s, pts in paths.items():
+            pts = np.array(pts)
+            for a_, b_ in zip(pts[:-1], pts[1:]):
+                line(scn, a_, b_, 0.008, [0.35, 0.37, 0.42, 0.9])
         for k, s, c, ax in ev:
             h0 = S.surface(c[None, :2])[0]
             yaw = np.arctan2(ax[1], ax[0]); cy, sy = np.cos(yaw), np.sin(yaw)
             mat = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
-            add(scn, mujoco.mjtGeom.mjGEOM_BOX, [0.085, 0.035, 0.004], [c[0], c[1], h0 + 0.005], mat, ACCENT)
+            add(scn, mujoco.mjtGeom.mjGEOM_BOX, [0.095, 0.04, 0.004], [c[0], c[1], h0 + 0.005], mat, ACCENT)
             labels.append((np.array([c[0], c[1], h0 + 0.02]), f"+{(k - t) / fps:.2f} s"))
-        # desired velocity
-        base = q[:3] + [0, 0, 0.62]
+        base = q[:3] + [0, 0, 0.55]  # desired velocity
         g = add(scn, mujoco.mjtGeom.mjGEOM_ARROW, [0, 0, 0], [0, 0, 0], rgba=[0.25, 0.27, 0.32, 1])
-        mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_ARROW, 0.022, base, base + 0.55 * f)
+        mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_ARROW, 0.022, base, base + 0.5 * f)
 
-    cam = side_cam(S, q, -30.0, 5.0, ahead=1.1, toward=35.0, dz=-0.1)
+    el, dist, toward, ahead = view
+    cam = side_cam(S, q, el, dist, ahead=ahead, toward=toward, dz=dz)
     img, glcam = S.shoot(cam, extra)
-    dr = ImageDraw.Draw(img); font = ImageFont.truetype("DejaVuSans-Bold.ttf", int(S.h * 0.028))
+    dr = ImageDraw.Draw(img); font = ImageFont.truetype("DejaVuSans-Bold.ttf", int(S.h * 0.04))
     for p, s in labels:
         u, v = project(glcam, p, S.w, S.h)
         tw = dr.textlength(s, font=font)
-        dr.text((u - tw / 2, v + S.h * 0.022), s, fill=tuple(int(255 * c) for c in ACCENT[:3]), font=font,
-                stroke_width=3, stroke_fill=(255, 255, 255))
+        dr.text((u - tw / 2, v + S.h * 0.03), s, fill=tuple(int(255 * c) for c in ACCENT[:3]), font=font,
+                stroke_width=4, stroke_fill=(255, 255, 255))
     img.save(os.path.join(out, "decision.png"))
 
 
@@ -315,7 +315,7 @@ def control(S, z, Q, t, out, mu=0.6, view=(-14.0, 3.2, 25.0)):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out"); ap.add_argument("clip")
-    ap.add_argument("--see", type=int, default=24); ap.add_argument("--plan", type=int, default=24); ap.add_argument("--force", type=int, default=50)
+    ap.add_argument("--see", type=int, default=24); ap.add_argument("--plan", type=int, default=42); ap.add_argument("--force", type=int, default=50)
     ap.add_argument("--width", type=int, default=2400); ap.add_argument("--height", type=int, default=1150)
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
     z = np.load(a.clip, allow_pickle=True); Q = z["qpos"]
