@@ -414,6 +414,8 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
   `--aim-level` keeps the head camera aim at the robot's height (aiming at the terrain jumps into the pit).
   Push-off frames give no forces there (toe hangs over the edge, heel only); 55 is the landing (1.7 bw).
   Scan points are composited from a shadowless pass (their shadows streak the walls; alpha < 1 does not help).
+  `--still 49 --still-view -14 3.4 5 0.1`: the robot alone mid-stride over the gap (`still_49.png`). Scene flags
+  persist across `update_scene`: `shoot` re-enables the skybox the x-ray pass turns off.
 
 ## Port status (2026-10-27, lab server)
 

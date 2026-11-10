@@ -4,7 +4,8 @@ reaction forces from inverse dynamics, friction cones).
 
   python render_concepts.py out_dir retarget.npz [--see 24] [--plan 42] [--force 50] [--width 2400 --height 1150]
       [--see-ahead 1.4] [--depth-range 0.5 3.4] [--cut] [--plain-ground] [--inset left] [--aim-level]
-      [--see-view -26 4.9 35 0.65] [--plan-view -24 3.3 15 0.5] [--force-view -14 3.2 25 0.1]   (elevation distance toward ahead)
+      [--see-view -26 4.9 35 0.65] [--plan-view -24 3.3 15 0.5] [--force-view -14 3.2 25 0.1]
+      [--still 49 ...] [--still-view -12 3.3 5 0.1]   (views: elevation distance toward ahead)
 
 --see/--plan/--force: the clip frame for each image (Dash fps).
 """
@@ -99,6 +100,7 @@ class Scene:
         self.r.update_scene(self.d, cam, opt or self.full)
         self.r.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = 1
         self.r.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = int(shadow)
+        self.r.scene.flags[mujoco.mjtRndFlag.mjRND_SKYBOX] = 1  # scene flags persist: control()'s x-ray pass clears it
         if extra:
             extra(self.r.scene)
         glcam = self.r.scene.camera[0]
@@ -335,6 +337,13 @@ def control(S, z, Q, t, out, mu=0.6, view=(-14.0, 3.2, 25.0, 0.1)):
     Image.fromarray((base * (1 - a) + over * a).astype(np.uint8)).save(os.path.join(out, "motion_control.png"))
 
 
+def still(S, Q, t, out, view=(-12.0, 3.3, 5.0, 0.1), dz=-0.3):
+    """The robot alone (no markers) at frame t, e.g. mid-stride over a gap."""
+    el, dist, toward, ahead = view
+    S.pose(Q[t]); img, _ = S.shoot(side_cam(S, Q[t], el, dist, ahead=ahead, toward=toward, dz=dz))
+    img.save(os.path.join(out, f"still_{t}.png"))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out"); ap.add_argument("clip")
@@ -344,6 +353,8 @@ def main():
     ap.add_argument("--depth-range", type=float, nargs=2, default=(0.5, 3.4), help="depth colour map range, m")
     ap.add_argument("--see-view", type=float, nargs=4, default=(-26.0, 4.9, 35.0, 0.65), help="elevation distance toward ahead")
     ap.add_argument("--force-view", type=float, nargs=4, default=(-14.0, 3.2, 25.0, 0.1), help="elevation distance toward ahead")
+    ap.add_argument("--still", type=int, nargs="*", default=[], help="frames to render without markers")
+    ap.add_argument("--still-view", type=float, nargs=4, default=(-12.0, 3.3, 5.0, 0.1), help="elevation distance toward ahead")
     ap.add_argument("--plan-view", type=float, nargs=4, default=(-24.0, 3.3, 15.0, 0.5), help="elevation distance toward ahead")
     ap.add_argument("--cut", action="store_true", help="cut away the terrain between the side camera and the path")
     ap.add_argument("--plain-ground", action="store_true", help="untextured darker ground (for terrain raised above it)")
@@ -355,6 +366,8 @@ def main():
     perception(S, Q, a.see, a.out, a.see_ahead, a.depth_range, tuple(a.see_view), a.inset, a.aim_level)
     decision(S, z, Q, a.plan, a.out, view=tuple(a.plan_view))
     control(S, z, Q, a.force, a.out, view=tuple(a.force_view))
+    for t in a.still:
+        still(S, Q, t, a.out, tuple(a.still_view))
     print("wrote", a.out)
 
 
