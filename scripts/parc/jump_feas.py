@@ -2,12 +2,13 @@
 travel, the takeoff speed a ballistic CoM needs, and the leg torques around takeoff and landing from inverse
 dynamics (contacts solved as in qa_parc.support) relative to Dash's effort limits.
 
-  python jump_feas.py out.csv retarget.npz [...] [--min-flight 0.12] [--window 0.2]
+  python jump_feas.py out.csv retarget.npz [...] [--min-flight 0.12] [--window 0.2] [--effort hip=80 knee=120 ankle=45]
 
-One row per flight, with the clip-wide torque and joint speed ratios repeated. ratio = |tau| / effort limit;
-> 1 is beyond the motors. az_fit_g / ah_fit_g: CoM vertical / horizontal acceleration in the air from a parabola
-fit, in g (ballistic: -1 / 0). ghost_flight (inverse dynamics, smoothed over 7 frames) bleeds stance force into
-short flights; prefer az_fit_g. Also reads flat-ground BONES npz (contact from sole height).
+One row per flight, with the clip-wide torque and joint speed ratios repeated. ratio = |tau| / effort limit
+(dash.py's, or --effort per motor group: hip covers hip yaw/roll/pitch and shoulder pitch); > 1 is beyond the
+motors. az_fit_g / ah_fit_g: CoM vertical / horizontal acceleration in the air from a parabola fit, in g
+(ballistic: -1 / 0). ghost_flight (inverse dynamics, smoothed over 7 frames) bleeds stance force into short
+flights; prefer az_fit_g. Also reads flat-ground BONES npz (contact from sole height).
 """
 import argparse
 import csv
@@ -49,13 +50,19 @@ def load(f, m):
     return Q, 1.0 / float(np.ravel(z["fps"])[0]), c, Terrain(np.zeros((2, 2)), [-100.0, -100.0], 200.0)
 
 
-def clip_row(f, m, min_flight, window):
+GROUP = {"hip": 0, "knee": 1, "ankle": 2, "arm": 3}  # --effort names -> _ACTUATOR_GROUPS index
+
+
+def clip_row(f, m, min_flight, window, effort=None):
     Q, dt, c, terr = load(f, m)
     tau = []
     sc = support(m, Q, terr, dt, tau)
     tau = np.abs(np.array(tau))
     names = [m.joint(int(np.flatnonzero(m.jnt_dofadr == i)[0])).name for i in range(6, m.nv)]
-    lim = np.array([next(g[3] for g in _ACTUATOR_GROUPS if any(re.fullmatch(e, n) for e in g[0])) for n in names])
+    eff = [g[3] for g in _ACTUATOR_GROUPS]
+    for k, v in (effort or {}).items():
+        eff[GROUP[k]] = v
+    lim = np.array([next(e for g, e in zip(_ACTUATOR_GROUPS, eff) if any(re.fullmatch(x, n) for x in g[0])) for n in names])
     ratio = tau / lim
     grp = {g: [i for i, n in enumerate(names) if n.endswith(g)] for g in LEG}
     leg = np.concatenate(list(grp.values()))
@@ -97,12 +104,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out"); ap.add_argument("clips", nargs="+")
     ap.add_argument("--min-flight", type=float, default=0.12); ap.add_argument("--window", type=float, default=0.2)
+    ap.add_argument("--effort", nargs="*", default=[], help="override effort limits (Nm), e.g. hip=80 knee=120 ankle=45")
     a = ap.parse_args()
+    effort = {k: float(v) for k, v in (e.split("=") for e in a.effort)}
     m = mujoco.MjModel.from_xml_path(DASH_XML)
     rows = []  # clips without a flight add no rows
     for f in a.clips:
         try:
-            rows += clip_row(f, m, a.min_flight, a.window)
+            rows += clip_row(f, m, a.min_flight, a.window, effort)
         except Exception as e:  # keep the shard going
             print("failed", f, e, file=sys.stderr)
     with open(a.out, "w", newline="") as fh:

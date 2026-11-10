@@ -401,6 +401,13 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
   - `qa/feasible_strict.txt` (every flight within takeoff_v <= 3.0, to_leg <= 1.8, land_leg <= 2.0, about the BONES
     p90): 1,129 clips, 0.74 h. `qa/feasible_loose.txt` (3.5 / 2.2 / 2.4): 1,866 clips, 1.22 h. Jumping and
     vaulting nearly all fail; stairs and PARC-generated terrain clips survive best.
+  - Raised peak limits (2026-11-10, `--effort hip=80 knee=120 ankle=45`: more motor current): `qa/flights_peak.csv`,
+    `qa/flights_bones400_peak.csv`. Same thresholds on the new ratios (the reference-vs-tracker bias is a property
+    of the method, not the limits): `qa/feasible_strict_peak.txt` 1,569 clips 1.03 h, `feasible_loose_peak.txt`
+    2,547 clips 1.71 h, `feasible_torque_peak.txt` (strict torque, no takeoff speed cap) 3,663 clips 2.72 h.
+    Flights over the torque bars drop from 45% to 15% (takeoff) and 24% to 4% (landing); the 3.0 m/s takeoff speed
+    cap (68% of flights over) now binds. The ankle (+29% only) binds on about two thirds of flights. Big flights
+    pass the torque bars 13% -> 39%. Current raises torque, not top speed, so the speed cap stays.
 - `render_hq.py out_dir clip.npz ... [--human] [--slow 0.5]`: presentation renders (1920x1080, 60 fps,
   8x MSAA, 16k shadow map, aluminum robot, camera on the robot's front-left following its smoothed heading).
   - Shadow/fog notes: a directional light's shadow box is centered on its position, so the key light follows
