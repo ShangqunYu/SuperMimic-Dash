@@ -408,6 +408,12 @@ Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SI
   from inverse dynamics, friction cones, CoM and gravity; arrows drawn in an x-ray pass over the robot).
   Set `m.light_pos` then call `mj_forward` before rendering: the renderer reads `d.light_xpos`, and a
   stale one puts the shadow box elsewhere (acne). Outputs: `logs/parc/concepts/` (stairs_001 aug36).
+  Gap version (`logs/parc/concepts_gap/`, boxes_1274_1_opt_flipped_dm: walkway, 0.54 m gap, +0.28 m platform):
+  `--cut --plain-ground --inset right --see 32 --aim-level --see-ahead 1.5 --depth-range 0.8 3.0
+  --see-view -20 3.6 5 0.8 --plan 41 --plan-view -18 3.3 5 0.6 --force 55 --force-view -18 3.1 5 -0.45`.
+  `--aim-level` keeps the head camera aim at the robot's height (aiming at the terrain jumps into the pit).
+  Push-off frames give no forces there (toe hangs over the edge, heel only); 55 is the landing (1.7 bw).
+  Scan points are composited from a shadowless pass (their shadows streak the walls; alpha < 1 does not help).
 
 ## Port status (2026-10-27, lab server)
 

@@ -2,7 +2,9 @@
 depth image), decision (candidate and chosen footholds, swing paths, step timing) and motion control (ground
 reaction forces from inverse dynamics, friction cones).
 
-  python render_concepts.py out_dir retarget.npz [--see 24] [--plan 24] [--force 50] [--width 2400 --height 1150]
+  python render_concepts.py out_dir retarget.npz [--see 24] [--plan 42] [--force 50] [--width 2400 --height 1150]
+      [--see-ahead 1.4] [--depth-range 0.5 3.4] [--cut] [--plain-ground] [--inset left] [--aim-level]
+      [--see-view -26 4.9 35 0.65] [--plan-view -24 3.3 15 0.5] [--force-view -14 3.2 25 0.1]   (elevation distance toward ahead)
 
 --see/--plan/--force: the clip frame for each image (Dash fps).
 """
@@ -21,6 +23,7 @@ from scipy.signal import savgol_filter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from parc_retarget import Terrain
 from render_hq import dash_model
+from render_strobe import section_cut
 
 ACCENT = np.array([0.48, 0.10, 0.20, 1.0])  # maroon, the slide accent
 CAND = np.array([0.20, 0.55, 0.45, 0.9])  # candidate footholds
@@ -65,10 +68,15 @@ def project(glcam, p, w, h):
 
 
 class Scene:
-    def __init__(self, z, w, h):
+    def __init__(self, z, w, h, cut=False, plain_ground=False):
         self.terr = Terrain(z["hf"], z["min_point"], z["dx"])
         self.boxes = self.terr.boxes()
-        self.m = dash_model(self.boxes, w, h)
+        self.m_all = dash_model(self.boxes, w, h)  # the head camera sees all the terrain
+        if cut:  # cutaway of the terrain between the side camera and the path, as in render_strobe
+            self.boxes = section_cut(self.boxes, z["qpos"], self.m_all, mujoco.MjData(self.m_all))
+        self.m = dash_model(self.boxes, w, h) if cut else self.m_all
+        if plain_ground:  # untextured, darker ground below raised terrain: the walkway's edges and the gaps read
+            g = self.m.geom("ground").id; self.m.geom_matid[g] = -1; self.m.geom_rgba[g] = [0.70, 0.73, 0.78, 1]
         self.m.vis.global_.fovy = 30.0
         self.d = mujoco.MjData(self.m)
         self.r = mujoco.Renderer(self.m, h, w, max_geom=20000)
@@ -87,9 +95,10 @@ class Scene:
         mujoco.mj_forward(self.m, self.d)  # the renderer reads d.light_xpos: a stale one leaves the shadow box elsewhere (acne)
         return c
 
-    def shoot(self, cam, extra=None, opt=None):
+    def shoot(self, cam, extra=None, opt=None, shadow=True):
         self.r.update_scene(self.d, cam, opt or self.full)
         self.r.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = 1
+        self.r.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = int(shadow)
         if extra:
             extra(self.r.scene)
         glcam = self.r.scene.camera[0]
@@ -119,12 +128,13 @@ def side_cam(S, q, el, dist, ahead=0.6, toward=30.0, dz=-0.15):
     return S.cam(look, az, el, dist)
 
 
-def perception(S, Q, t, out):
+def perception(S, Q, t, out, ahead=1.4, drange=(0.5, 3.4), view=(-26.0, 4.9, 35.0, 0.65), inset="left", aim_level=False):
     q = Q[t]; S.pose(q)
     f, lft, _ = yaw_frame(q)
     torso = S.d.xpos[S.m.body("torso").id]; R = S.d.xmat[S.m.body("torso").id].reshape(3, 3)
     eye = torso + R @ np.array([0.10, 0.0, 0.40])
-    tgt = q[:3] * [1, 1, 0] + 1.4 * f + [0, 0, S.surface((q[:2] + 1.4 * f[:2])[None])[0]]
+    # aim at the terrain `ahead` m on, or (aim_level) at the height under the robot: over a gap the terrain aim jumps
+    tgt = q[:3] * [1, 1, 0] + ahead * f + [0, 0, S.surface((q[:2] + (0 if aim_level else ahead) * f[:2])[None])[0]]
     fwd = tgt - eye; dist = np.linalg.norm(fwd); fwd /= dist
     fovy, aspect = 58.0, 1.6
     # height scan: a grid ahead of the robot, coloured by terrain height
@@ -141,26 +151,39 @@ def perception(S, Q, t, out):
             add(scn, mujoco.mjtGeom.mjGEOM_SPHERE, [0.014, 0, 0], [x, y, zz + 0.012], rgba=[*cmap(0.15 + 0.8 * c)[:3], 1])
         add(scn, mujoco.mjtGeom.mjGEOM_SPHERE, [0.028, 0, 0], eye, rgba=ACCENT)  # head camera
 
-    cam = side_cam(S, q, -26.0, 4.9, ahead=0.65, toward=35.0)
-    img, _ = S.shoot(cam, extra)
+    el, dist_, toward, ah = view
+    cam = side_cam(S, q, el, dist_, ahead=ah, toward=toward)
+    # the scan points cast no shadows (streaks on the walls): composite them from a shadowless pass
+    img, _ = S.shoot(cam, lambda scn: add(scn, mujoco.mjtGeom.mjGEOM_SPHERE, [0.028, 0, 0], eye, rgba=ACCENT))
+    pts, _ = S.shoot(cam, extra, shadow=False); bare, _ = S.shoot(cam, None, shadow=False)
+    mask = (np.abs(np.asarray(pts, np.int16) - np.asarray(bare, np.int16)).max(-1) > 6)[..., None]
+    img = Image.fromarray(np.where(mask, np.asarray(pts), np.asarray(img)))
     img.save(os.path.join(out, "perception_scene.png"))
     # the head camera's depth image (terrain only)
     hc = mujoco.MjvCamera(); hc.lookat[:] = tgt; hc.distance = dist
     hc.azimuth = np.degrees(np.arctan2(fwd[1], fwd[0])); hc.elevation = np.degrees(np.arcsin(fwd[2]))
-    fovy0 = S.m.vis.global_.fovy; S.m.vis.global_.fovy = fovy
+    fovy0 = S.m_all.vis.global_.fovy; S.m_all.vis.global_.fovy = fovy
     dh, dw = S.h, int(S.h * aspect) if int(S.h * aspect) <= S.w else S.w
-    rr = mujoco.Renderer(S.m, dh, dw)
-    rr.update_scene(S.d, hc, S.terrain_only); rr.enable_depth_rendering()
+    rr = mujoco.Renderer(S.m_all, dh, dw); dd = mujoco.MjData(S.m_all); dd.qpos[:] = q; mujoco.mj_forward(S.m_all, dd)
+    rr.update_scene(dd, hc, S.terrain_only); rr.enable_depth_rendering()
     depth = rr.render().copy(); rr.close()
-    S.m.vis.global_.fovy = fovy0
-    dn = np.clip((depth - 0.5) / (3.4 - 0.5), 0, 1)
+    S.m_all.vis.global_.fovy = fovy0
+    dn = np.clip((depth - drange[0]) / (drange[1] - drange[0]), 0, 1)
     gy, gx = np.gradient(depth)
     edge = np.clip(np.hypot(gx, gy) / (np.percentile(np.hypot(gx, gy), 99) + 1e-9), 0, 1)  # risers and step edges
-    rgb = (matplotlib.colormaps["turbo"](1 - dn)[..., :3] * (1 - 0.55 * edge[..., None]) * 255).astype(np.uint8)
+    # shade by the surface normal from the depth (lit from above): walls read apart from the tops behind them
+    th_ = np.tan(np.radians(fovy / 2))
+    U, V = np.meshgrid((np.arange(dw) - dw / 2 + 0.5) / (dh / 2) * th_, (dh / 2 - np.arange(dh) - 0.5) / (dh / 2) * th_)
+    P = np.dstack([U * depth, V * depth, depth])  # camera frame: x right, y up, z forward
+    nrm = np.cross(np.gradient(P, axis=1), np.gradient(P, axis=0)); nrm /= np.linalg.norm(nrm, axis=-1, keepdims=True) + 1e-12
+    nrm *= np.where(nrm[..., 2:3] > 0, -1, 1)
+    e = np.radians(hc.elevation); L = np.array([0, np.cos(e), np.sin(e)]) + [0.25, 0, -0.35]; L /= np.linalg.norm(L)
+    shade = 0.6 + 0.4 * np.clip(nrm @ L, 0, 1)
+    rgb = (matplotlib.colormaps["turbo"](1 - dn)[..., :3] * shade[..., None] * (1 - 0.55 * edge[..., None]) * 255).astype(np.uint8)
     dimg = Image.fromarray(rgb); dimg.save(os.path.join(out, "perception_depth.png"))
     # scene with the depth image inset (top right)
     comp = img.copy(); iw = int(S.w * 0.30); ih = int(iw / aspect)
-    pad = int(S.w * 0.018); x0 = pad; y0 = pad  # top left, over the empty floor behind the robot
+    pad = int(S.w * 0.018); y0 = pad; x0 = pad if inset == "left" else S.w - pad - iw  # over empty floor or sky
     dr = ImageDraw.Draw(comp)
     dr.rectangle([x0 - 4, y0 - 4, x0 + iw + 3, y0 + ih + 3], fill=tuple(int(255 * c) for c in ACCENT[:3]))
     comp.paste(dimg.resize((iw, ih), Image.LANCZOS), (x0, y0))
@@ -263,7 +286,7 @@ def contact_forces(m, Q, dt, t, terr, mu=0.6):
     return [(s, p, E @ lam[4 * i:4 * i + 4]) for i, (s, p) in enumerate(zip(sides, pts))], d
 
 
-def control(S, z, Q, t, out, mu=0.6, view=(-14.0, 3.2, 25.0)):
+def control(S, z, Q, t, out, mu=0.6, view=(-14.0, 3.2, 25.0, 0.1)):
     dt = 1.0 / float(z["fps"])
     F, _ = contact_forces(S.m, Q, dt, t, S.terr, mu)
     S.pose(Q[t])
@@ -296,8 +319,8 @@ def control(S, z, Q, t, out, mu=0.6, view=(-14.0, 3.2, 25.0)):
         g = add(scn, mujoco.mjtGeom.mjGEOM_ARROW, [0, 0, 0], [0, 0, 0], rgba=grey)
         mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_ARROW, 0.02, com, com - [0, 0, 0.42])
 
-    el, dist, toward = view
-    cam = side_cam(S, Q[t], el, dist, ahead=0.1, toward=toward, dz=-0.2)
+    el, dist, toward, ahead = view
+    cam = side_cam(S, Q[t], el, dist, ahead=ahead, toward=toward, dz=-0.2)
     img, _ = S.shoot(cam, lambda scn: (cones(scn), arrows(scn)))
     # x-ray pass: the arrows alone on black, pasted over the robot so the legs do not hide them
     none = mujoco.MjvOption(); none.geomgroup[:] = 0; none.sitegroup[:] = 0
@@ -317,12 +340,21 @@ def main():
     ap.add_argument("out"); ap.add_argument("clip")
     ap.add_argument("--see", type=int, default=24); ap.add_argument("--plan", type=int, default=42); ap.add_argument("--force", type=int, default=50)
     ap.add_argument("--width", type=int, default=2400); ap.add_argument("--height", type=int, default=1150)
+    ap.add_argument("--see-ahead", type=float, default=1.4, help="head camera aim, m ahead of the root")
+    ap.add_argument("--depth-range", type=float, nargs=2, default=(0.5, 3.4), help="depth colour map range, m")
+    ap.add_argument("--see-view", type=float, nargs=4, default=(-26.0, 4.9, 35.0, 0.65), help="elevation distance toward ahead")
+    ap.add_argument("--force-view", type=float, nargs=4, default=(-14.0, 3.2, 25.0, 0.1), help="elevation distance toward ahead")
+    ap.add_argument("--plan-view", type=float, nargs=4, default=(-24.0, 3.3, 15.0, 0.5), help="elevation distance toward ahead")
+    ap.add_argument("--cut", action="store_true", help="cut away the terrain between the side camera and the path")
+    ap.add_argument("--plain-ground", action="store_true", help="untextured darker ground (for terrain raised above it)")
+    ap.add_argument("--aim-level", action="store_true", help="aim the head camera at the height under the robot")
+    ap.add_argument("--inset", choices=("left", "right"), default="left", help="depth inset corner (top)")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
     z = np.load(a.clip, allow_pickle=True); Q = z["qpos"]
-    S = Scene(z, a.width, a.height)
-    perception(S, Q, a.see, a.out)
-    decision(S, z, Q, a.plan, a.out)
-    control(S, z, Q, a.force, a.out)
+    S = Scene(z, a.width, a.height, a.cut, a.plain_ground)
+    perception(S, Q, a.see, a.out, a.see_ahead, a.depth_range, tuple(a.see_view), a.inset, a.aim_level)
+    decision(S, z, Q, a.plan, a.out, view=tuple(a.plan_view))
+    control(S, z, Q, a.force, a.out, view=tuple(a.force_view))
     print("wrote", a.out)
 
 
