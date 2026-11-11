@@ -429,6 +429,49 @@ update, 10x2048 8-step WM windows, H = 32, gamma/lambda, reward terms, network s
     box (+ 14 avoid-obstacle clips on 3 terrains). v3 stair clips replay cleanly on their terrain (kinematic
     penetration <= 2.1 cm); the stairs-up failures are long climbs failing late (step 110-275 of 230-314).
 
+## US stairs and 25-31 cm box jumps (2026-11-11, lab server)
+
+User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 17.8 cm, tread >= 11 in /
+27.9 cm; IRC residential: <= 19.7 cm, >= 25.4 cm) and jump over a 25-30 cm box.
+- **The stair mocap is US stairs shrunk to Dash scale** (x0.677): v3 risers 11-12.6 cm, treads ~17 cm. Real
+  stairs are ~1.45x that in both. Dash: leg (hip to ankle) 0.56 m, ~0.6 m to the sole, 40 kg, capsule foot
+  18 cm long; 17.8 cm is ~30% of its leg (like a 26 cm step for an adult). It already steps onto 30 cm boxes.
+- **`terrain_edit.py` options** (`stairs_us.sh` batches them): `--rise/--run` rebuild the fitted staircase
+  (steps keep their indices), `--slow` resamples the source first (stairs_us: run / 0.172, the source's speed
+  along the stairs), `--reach` (`reach_root`: the torso moves by the smoothed unreached part of the standing
+  feet's targets), `--follow-support` (`support_offset`: torso offset = the standing foot's at mid single
+  support, both feet's mean at long double support, linear between), torque use per joint in the scores.
+  - Pilot (up_start 101, 17.8/27.9): mean-offset torso alone -> stance IK 5.7 cm, 200 ms unsupported, hip
+    p99 1.5x limit. + reach: hip p99 2.7x; the high-torque frames were single support with the COM 19 cm ahead
+    of the standing foot (swing feet pulled the torso forward). Standing-only reach + follow-support + 1.6x
+    slower: QA passes, hip over its 80 Nm limit 3.2% of the time (the trained 12.4 cm clip: 6.3%), COM 3 cm
+    from the support. Inverse-dynamics hip p99 is still 1.2-2.5x the limit on the A301 takes.
+  - The joint-speed QA compared a slowed edit with the slowed source; now the source at its own speed.
+- **Batch**: 32 walking stair takes (up_start 6, down_stop 6, down_loop 4, + mirrors) x risers 12 / 15 /
+  17.8 / 20 cm x treads 25.4 / 27.9 / 32 cm = 384 edits (`data/terrain/edited_us`, scores
+  `logs/terrain_edit_us`), **306 pass**: up 12/12 at 12-15 cm, 10-11/12 at 17.8 cm, 3-4/12 at 20 cm (stance
+  IK > 4 cm, penetration); down 14-18/20 everywhere.
+- **Box jumps** (`jump_boxes_us.py`): only 10 source motions clear >= 27 cm (7 no-hands obstacle jumps, 3 of 4
+  running obstacle jumps; the 91 forward broad jumps clear < 27 cm). 336 clips: boxes 25 / 28 / 31 cm high,
+  15 / 25 / 35 cm deep, 40 / 100 cm wide, wherever the unedited motion clears by 2 cm.
+- **Library v4**: `data/terrain/manifest_v4.csv` (v3 + US stairs + jumps) -> `dash_flat_terrain_v4_compact.pt`
+  (67,147 clips, 3,044 terrain) -> `dash_flat_terrain_v4_parc_compact.pt` (+ PARC; 71,828 clips, 136.2 h,
+  5,006 terrains). Kinematic replay: stairs max penetration p50 1.5-1.8 cm, max 3.4 cm; jumps 0.
+- `init_from` now copies sampler bins by clip name when the library changed (520,835 of 525,557 matched).
+- **Run `dash_teacher_v4`** (GPU 0, started 2026-11-11 ~11:15): init_from `dash_teacher` 18k (which resumed
+  `dash_ab_new` 10k on v3+PARC), v4 library, same flags (hardware DR, policy scan, terrain ratio 0.4,
+  constant LR), 100k iterations. Log `logs/dash_teacher_v4.out`.
+- Benchmarks (scratchpad `ab_bench.py --lib`, groups by name; first three as in the A/B):
+
+  | | PARC (4,681) | v3 terrain (2,402) | flat sample (2,000) | US stairs (306) | US box jumps (336) |
+  |---|---|---|---|---|---|
+  | dash_teacher 18k (v3 lib) | 1,172, 0.494 | 30, 0.860 | 40, 0.877 | 186, 0.622 | 142, 0.572 |
+
+  18k on the US clips before seeing them: stairs up fail 19/36 (12 cm), 22/36 (15), 29/31 (17.8), 11/11 (20);
+  down 20/50, 21/46, 26/48, 38/48; box jumps 35/120 (25 cm), 44/108 (28), 63/108 (31).
+- Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
+  and running approaches) would add the most variety; the box set reuses 10 motions.
+
 ## PARC terrain data (2026-11-08, lab server)
 
 Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SIGGRAPH 2025; MIT):
