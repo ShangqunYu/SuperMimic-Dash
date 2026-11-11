@@ -549,8 +549,9 @@ def torque_use(m, tau: np.ndarray) -> dict:
 
 
 def joint_speed(q_src: np.ndarray, q_edit: np.ndarray, dt: float) -> dict:
-    """Peak joint speeds of the edit against its source. ``speed_excess`` > 0 means the edit sped
-    some joint up beyond 2x its own peak speed in the source plus 5 rad/s (IK jumps)."""
+    """Peak joint speeds of the edit against its source (at the source's own speed, also for a slowed
+    edit). ``speed_excess`` > 0 means the edit sped some joint up beyond 2x its own peak speed in the
+    source plus 5 rad/s (IK jumps)."""
     v = (np.abs(np.diff(q_edit[:, 7:], axis=0)) / dt).max(0)
     v0 = (np.abs(np.diff(q_src[:, 7:], axis=0)) / dt).max(0)
     return {"joint_speed_max": float(v.max()), "src_joint_speed_max": float(v0.max()), "speed_excess": float((v - 2 * v0 - 5).max())}
@@ -586,6 +587,7 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
             if kind is None:
                 continue
             dat = np.load(f, allow_pickle=True).item()
+            q_orig = to_qpos(dat["q"])[::STEP]  # the speed check compares against the source at its own speed
             if slow != 1.0:
                 dat["q"], dat["mocap"] = slow_down(dat["q"], slow), slow_down(dat["mocap"], slow)
             clip = clip + tag
@@ -635,7 +637,7 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
                 for e in range(2):
                     stance2[:, i, e] = stance_mask(fe2[:, i, e], dt, 0.12, 6) | stance[:, i, e]
             sc1 = scores(new, fe2, sp2, foot_r, shin_r, stance2, resid)
-            sc1.update(joint_speed(qpos, q2, dt))
+            sc1.update(joint_speed(q_orig, q2, dt))
             tau = []
             sc1.update(support_check(m, q2, new, dt, tau_out=tau))
             sc1.update(torque_use(m, np.asarray(tau)))
