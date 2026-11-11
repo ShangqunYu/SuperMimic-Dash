@@ -49,11 +49,13 @@ def goal_env_kwargs(config: dict) -> dict:
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1", num_clips: int | None = None, randomize: bool = False, goal_stride: int = 1, goal_root_ori: bool = False, policy_scan: bool = False) -> list[ClipResult]:
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1", num_clips: int | None = None, randomize: bool = False, goal_stride: int = 1, goal_root_ori: bool = False, policy_scan: bool = False, clip_ids: list[int] | None = None) -> list[ClipResult]:
     """``npz_files`` may be one packed .pt library; then ``num_clips`` (its clip count) sizes the env batch.
-    ``randomize`` turns on the training randomization (observation noise, sim and hardware DR; same seed for every policy)."""
+    ``randomize`` turns on the training randomization (observation noise, sim and hardware DR; same seed for every policy).
+    ``clip_ids``: evaluate only these library clips (results in that order)."""
     packed = len(npz_files) == 1 and str(npz_files[0]).endswith(".pt")
-    num_envs = min(num_envs or 1024, num_clips if packed and num_clips else len(npz_files))
+    n_total = len(clip_ids) if clip_ids is not None else (num_clips if packed and num_clips else len(npz_files))
+    num_envs = min(num_envs or 1024, n_total)
     args = SuperMimicEnvCfgArgs(
         npz_files=npz_files,
         robot=robot,
@@ -78,15 +80,17 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
     try:
         cmd = env.command_manager.get_term("motion")
         lib = cmd.library
-        n_clips = lib.num_clips
+        queue = torch.as_tensor(clip_ids if clip_ids is not None else range(lib.num_clips), dtype=torch.long, device=device)
+        n_clips = int(queue.numel())
+        clip_at = lambda pos: queue[torch.clamp(pos, max=n_clips - 1)]  # noqa: E731
         max_r = 0.1  # paper reward upper bound per step (dt * 5)
 
-        # Clip queue: env e plays clips e, e+N, e+2N, ...
+        # Clip queue: env e plays queue entries e, e+N, e+2N, ...
         current = torch.arange(num_envs, device=device)
         nxt = current + num_envs
-        cmd.forced_frame[:] = lib.clip_start[current]
+        cmd.forced_frame[:] = lib.clip_start[clip_at(current)]
         obs, _ = env.reset()
-        cmd.forced_frame[:] = lib.clip_start[torch.clamp(nxt, max=n_clips - 1)]
+        cmd.forced_frame[:] = lib.clip_start[clip_at(nxt)]
         active = torch.ones(num_envs, dtype=torch.bool, device=device)
         ret_sum = torch.zeros(num_envs, device=device)
         steps = torch.zeros(num_envs, dtype=torch.long, device=device)
@@ -107,9 +111,10 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
                     ci = int(current[e])
                     if ci < n_clips and ci not in results:
                         st = int(steps[e])
+                        li = int(queue[ci])
                         results[ci] = ClipResult(
-                            name=lib.clips[ci].name,
-                            frames=lib.clips[ci].length,
+                            name=lib.clips[li].name,
+                            frames=lib.clips[li].length,
                             steps=st,
                             norm_return=float(ret_sum[e]) / (max_r * max(st, 1)),
                             failed=bool(term[e]),
@@ -124,7 +129,7 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
                 nxt[ids] = nxt[ids] + num_envs
                 finished = current[ids] >= n_clips
                 active[ids[finished]] = False
-                cmd.forced_frame[ids] = lib.clip_start[torch.clamp(nxt[ids], max=n_clips - 1)]
+                cmd.forced_frame[ids] = lib.clip_start[clip_at(nxt[ids])]
                 ret_sum[ids] = 0.0
                 term_sum[ids] = 0.0
                 steps[ids] = 0

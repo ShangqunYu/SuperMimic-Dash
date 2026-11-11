@@ -393,6 +393,19 @@ update, 10x2048 8-step WM windows, H = 32, gamma/lambda, reward terms, network s
 - Old checkpoints: `load_policy_from_checkpoint` fills missing policy fields with `LEGACY_POLICY_CFG`;
   `eval.benchmark.goal_env_kwargs(config)` gives scripts the checkpoint's goal layout (old: stride 1, no root ori).
 - Smoke run (256 envs, 300 it, teacher flags): WM nse8 0.024 vs 0.34 with the old code, imag return 0.95 vs 0.44.
+- **A/B, 10k iterations each** (2026-11-10, `dash_ab_new` = db4ddb4 on GPU 0, `dash_ab_old` = c05ea41 from a
+  worktree on GPU 1; both from scratch, 4096 envs, PARC library, hardware DR, terrain ratio 0.4, policy scan,
+  total 100k so the old cosine barely decays). Benchmark (`run_benchmark(clip_ids=...)`, nominal, no noise;
+  scratchpad `ab_bench.py`, results `logs/ab_eval/`), failures and mean score:
+
+  | | PARC (4,681) | v3 terrain (2,402) | flat sample (2,000) |
+  |---|---|---|---|
+  | old | 2,589, 0.244 | 1,440, 0.571 | 85, 0.623 |
+  | new | **1,396, 0.461** | **68, 0.839** | **48, 0.847** |
+
+  PARC failures new / old: running 208 / 611 (of 1,643), platform 166 / 376 (604), stairs 60 / 147 (198), vault
+  56 / 131 (228), jumps 15 / 10 (26), PARC-generated 891 / 1,314 (1,982). v3 box come-up 29 / 1,299. WM at 10k:
+  nse8 0.064 / 0.101, terrain nse8 0.16 / 0.19.
 
 ## PARC terrain data (2026-11-08, lab server)
 
