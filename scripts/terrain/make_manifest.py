@@ -19,6 +19,7 @@ Jump clips (jump_pilot.py: box placed under the unedited motion) are copied from
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 
 import numpy as np
@@ -40,24 +41,31 @@ def passes(r: dict) -> bool:
 
 
 def main(scores: Path = Path("logs/terrain_edit_v3"), edited: Path | None = None, meta: Path = Path("data/terrain/meta.csv"),
-         jumps_from: Path = Path("data/terrain/manifest.csv"), out: Path = Path("data/terrain/manifest_v3.csv")) -> None:
+         jumps_from: Path = Path("data/terrain/manifest.csv"), out: Path = Path("data/terrain/manifest_v3.csv"), base: Path | None = None,
+         extra: tuple[Path, ...] = ()) -> None:
+    """``scores`` is searched recursively. With ``base`` (an earlier manifest) its rows come first and
+    ``jumps_from`` is not used; ``extra`` manifests (e.g. jump_boxes_us.py's) are appended as they are."""
     edited = edited or Path(str(scores).replace("logs/terrain_edit", "data/terrain/edited"))
     group = {r["name"]: r["content"] for r in csv.DictReader(open(meta))}
     rows, seen = [], set()
-    for sf in sorted(scores.glob("scores_*.csv")):
+    for sf in sorted(scores.rglob("scores_*.csv")):
         for r in csv.DictReader(open(sf)):
             if r["kind"] == "failed" or r["clip"] in seen or not r.get("after_ik_resid_stance_max") or "jog" in r["clip"]:
                 continue
             seen.add(r["clip"])
             f = edited / f"dash_{r['clip']}.npz"
             z = np.load(f)
-            rows.append({"clip": r["clip"], "group": group.get(r["clip"], ""), "pass": int(passes(r)), "file": str(f), "terrain": r["terrain"],
+            rows.append({"clip": r["clip"], "group": group.get(re.sub(r"_us_r\d+_t\d+$", "", r["clip"]), ""), "pass": int(passes(r)), "file": str(f), "terrain": r["terrain"],
                          "seconds": f"{len(z['qpos']) / float(z['fps']):.2f}"})
-    jumps = [r for r in csv.DictReader(open(jumps_from)) if "edited_jumps" in r["file"]]
+    jumps = [] if base else [r for r in csv.DictReader(open(jumps_from)) if "edited_jumps" in r["file"]]
+    base_rows = list(csv.DictReader(open(base))) if base else []
+    extra_rows = [r for e in extra for r in csv.DictReader(open(e))]
     with open(out, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=FIELDS)
         w.writeheader()
-        w.writerows(rows + jumps)
+        w.writerows(base_rows + rows + jumps + extra_rows)
+    if base_rows or extra_rows:
+        print(f"  + {len(base_rows)} rows from {base}, {len(extra_rows)} from {', '.join(map(str, extra))}")
     n_pass = sum(r["pass"] for r in rows)
     print(f"wrote {out}: {len(rows)} edited clips ({n_pass} pass) + {len(jumps)} jump clips ({sum(r['pass'] == '1' for r in jumps)} pass)")
 

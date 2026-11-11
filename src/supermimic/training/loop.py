@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
@@ -243,7 +244,14 @@ class Trainer:
         # library, so its bins are a prefix of ours; the terrain bins start fresh. From a checkpoint
         # trained on another terrain set (more bins than ours), only the leading flat bins are kept.
         nb = ck["bin_return"].numel()
-        if nb > self.command.bin_return.numel():
+        moved = self._bins_by_name(ck)
+        if moved is not None:
+            src, dst = moved
+            self.command.bin_return[dst] = ck["bin_return"][src].to(self.command.bin_return.dtype)
+            self.command.bin_memory[dst] = ck["bin_memory"][src].to(self.command.bin_memory.dtype)
+            self.command.bin_memory /= self.command.bin_memory.sum()
+            nb = 0
+        elif nb > self.command.bin_return.numel():
             nb = int((~self.command.terrain_bin).long().cumprod(0).sum())
             if self.is_main:
                 print(f"[INFO] init_from: checkpoint has {ck['bin_return'].numel()} sampler bins, library "
@@ -256,6 +264,37 @@ class Trainer:
             broadcast_params(m)
         if self.is_main:
             print(f"[INFO] initialized from {path} (iteration {ck['iteration']}); new: {sorted({'.'.join(k.split('.')[:2]) for k in missing})}")
+
+    def _bins_by_name(self, ck: dict) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Sampler bins of the checkpoint's library -> ours, matched by clip name (and length), when both are
+        packed libraries on disk and differ (a rebuilt library adds clips in the middle, so its bins are not a
+        prefix of the old ones). None: fall back to the prefix rule."""
+        old_lib, new_lib = ck["config"].get("data", {}).get("library"), self.cfg.data.library
+        if not old_lib or not new_lib or Path(old_lib) == Path(new_lib) or not Path(old_lib).exists():
+            return None
+        bf = self.lib.bin_frames
+
+        def ranges(lib):
+            pack = torch.load(lib, map_location="cpu", weights_only=False, mmap=True)
+            n = np.asarray(pack["lengths"], dtype=np.int64)
+            b = (n + bf - 1) // bf
+            return {str(k): (int(o), int(c)) for k, o, c in zip(pack["names"], np.cumsum(b) - b, b)}, int(b.sum())
+
+        old, n_old = ranges(old_lib)
+        new, n_new = ranges(new_lib)
+        if n_old != ck["bin_return"].numel() or n_new != self.command.bin_return.numel():
+            return None
+        src, dst = [], []
+        for k, (o, c) in new.items():
+            if k in old and old[k][1] == c:
+                src.append(np.arange(old[k][0], old[k][0] + c))
+                dst.append(np.arange(o, o + c))
+        if not src:
+            return None
+        src, dst = np.concatenate(src), np.concatenate(dst)
+        if self.is_main:
+            print(f"[INFO] init_from: {len(dst)} of {n_new} sampler bins matched by clip name from {old_lib}")
+        return torch.as_tensor(src, device=self.device), torch.as_tensor(dst, device=self.device)
 
     # ------------------------------------------------------------------ main loop
 

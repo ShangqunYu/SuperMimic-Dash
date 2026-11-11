@@ -269,9 +269,32 @@ def foot_offsets(fe, foot_r, stance, old: Profile, new: Profile, margin: float, 
     return dc, rv
 
 
+def support_offset(dc: np.ndarray, stance: np.ndarray, dt: float, still: float = 0.3) -> np.ndarray:
+    """Torso offset (T, 3) that keeps the source's centre of mass over the support: the standing foot's offset
+    at the middle of each single-support phase, both feet's mean at the middle of each double-support phase
+    longer than ``still`` s (standing), linear in between. The plain mean of both feet puts the torso ahead of
+    the standing foot once the treads are deeper than the source's (the swing foot's offset already counts)."""
+    standing = stance.any(-1)
+    keys_t, keys_v = [], []
+    for f in range(2):
+        for a, z in stance_phases(standing[:, f] & ~standing[:, 1 - f]):
+            keys_t.append((a + z) / 2)
+            keys_v.append(dc[(a + z) // 2, f])
+    for a, z in stance_phases(standing.all(1)):
+        if (z - a) * dt >= still:
+            keys_t.append((a + z) / 2)
+            keys_v.append(dc[(a + z) // 2].mean(0))
+    if not keys_t:
+        return dc.mean(1)
+    o = np.argsort(keys_t)
+    kt, kv = np.asarray(keys_t)[o], np.asarray(keys_v)[o]
+    t = np.arange(len(dc))
+    return np.stack([np.interp(t, kt, kv[:, i]) for i in range(3)], 1)
+
+
 def leg_ik(m, qpos, dc, rv, lift=None, iters: int = 50, rot_w: float = 0.3, damping: float = 1e-3, smooth: float = 1e-3,
-           knee_init: float = 0.25, tol: float = 1e-5):
-    """Root += mean foot offset; legs solved so each foot is at its original pose turned by rv about
+           knee_init: float = 0.25, tol: float = 1e-5, root=None, vec: bool = False, torso=None):
+    """Root += mean foot offset (or ``torso``) (+ ``root``); legs solved so each foot is at its original pose turned by rv about
     its capsule centre and moved by dc.
 
     Per frame, damped least squares warm-started from the previous frame's solution plus the
@@ -303,8 +326,9 @@ def leg_ik(m, qpos, dc, rv, lift=None, iters: int = 50, rot_w: float = 0.3, damp
             if lift is not None:  # swing clearance: the foot only, not the torso
                 tgt_p[t, f, 2] += lift[t, f]
     out = qpos.copy()
-    out[:, :3] += dc.mean(1)
+    out[:, :3] += (dc.mean(1) if torso is None else torso) + (0.0 if root is None else root)
     resid = np.zeros((T, 2))
+    miss = np.zeros((T, 2, 3))
     jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
     knee = LEG.index("knee_pitch")
     for t in range(T):
@@ -336,8 +360,25 @@ def leg_ik(m, qpos, dc, rv, lift=None, iters: int = 50, rot_w: float = 0.3, damp
         d.qpos[:] = out[t]
         mujoco.mj_kinematics(m, d)
         for f in range(2):
-            resid[t, f] = np.linalg.norm(tgt_p[t, f] - d.xpos[feet[f]])
-    return out, resid
+            miss[t, f] = tgt_p[t, f] - d.xpos[feet[f]]
+            resid[t, f] = np.linalg.norm(miss[t, f])
+    return (out, resid, miss) if vec else (out, resid)
+
+
+def reach_root(m, qpos, dc, rv, lift=None, root=None, passes: int = 6, tol: float = 0.005, sigma: float = 3.0, torso=None, standing=None):
+    """Extra root offset (T, 3) for steps taller or deeper than the source's: the mean-offset torso leaves a
+    foot out of reach (the trailing leg at full extension), so each pass moves the root by the mean unreached
+    part of the feet's targets, smoothed over time, and re-solves the legs. With ``standing`` (T, 2) only
+    standing feet pull the root (a swing foot pulling it forward puts the body ahead of its support)."""
+    root = np.zeros((len(qpos), 3)) if root is None else root.copy()
+    for _ in range(passes):
+        _, resid, miss = leg_ik(m, qpos, dc, rv, lift, root=root, vec=True, torso=torso)
+        far = (resid > tol) & (True if standing is None else standing)
+        step = np.where(far[..., None], miss, 0.0).sum(1) / np.maximum(far.sum(1), 1)[:, None]
+        if np.abs(step).max() < tol:
+            break
+        root += ndimage.gaussian_filter1d(step, sigma, axis=0, mode="nearest")
+    return root
 
 
 def slope_limit(w: np.ndarray, s: float) -> np.ndarray:
@@ -480,6 +521,33 @@ def support_check(m, qpos, prof: Profile, dt: float, mu: float = 0.6, frac: floa
     return {"ghost_run": best * dt, "ghost_p95": float(np.percentile(ghost[3:-3], 95))}
 
 
+def slow_down(x: np.ndarray, factor: float) -> np.ndarray:
+    """Resample frames along axis 0 to ``factor`` times as many (linear; xyzw quaternions renormalised)."""
+    t = np.linspace(0, len(x) - 1, int(round((len(x) - 1) * factor)) + 1)
+    i = np.minimum(np.floor(t).astype(int), len(x) - 2)
+    w = (t - i).reshape(-1, *([1] * (x.ndim - 1)))
+    y = (1 - w) * x[i] + w * x[i + 1]
+    if x.ndim == 2:  # retarget q: pos, quat xyzw, joints
+        y[:, 3:7] /= np.linalg.norm(y[:, 3:7], axis=1, keepdims=True)
+    return y
+
+
+def torque_use(m, tau: np.ndarray) -> dict:
+    """p99 |tau| / limit per leg joint type, from support_check's joint torques (dof order from 6)."""
+    import re
+
+    from supermimic.assets.dash.dash import _ACTUATOR_GROUPS
+
+    names = [m.joint(int(np.flatnonzero(m.jnt_dofadr == i)[0])).name for i in range(6, m.nv)]
+    lim = np.array([next(g[3] for g in _ACTUATOR_GROUPS if any(re.fullmatch(e, n) for e in g[0])) for n in names])
+    use = np.abs(tau[3:-3]) / lim
+    out = {}
+    for j in ("hip_roll", "hip_pitch", "knee_pitch", "ankle_pitch"):
+        cols = [i for i, n in enumerate(names) if n.endswith(j)]
+        out[f"tau99_{j}"] = float(np.percentile(use[:, cols], 99))
+    return out
+
+
 def joint_speed(q_src: np.ndarray, q_edit: np.ndarray, dt: float) -> dict:
     """Peak joint speeds of the edit against its source. ``speed_excess`` > 0 means the edit sped
     some joint up beyond 2x its own peak speed in the source plus 5 rad/s (IK jumps)."""
@@ -492,12 +560,18 @@ def fmt(sc):
     return (f"pen {sc['foot_pen_max'] * 100:5.1f}cm ({sc['foot_pen_frac_1cm'] * 100:4.1f}%>1cm) shin {sc['shin_pen_max'] * 100:5.1f}cm  "
             f"support p5 {sc['support_p5'] * 100:3.0f}% (<80%: {sc['support_lt80'] * 100:4.1f}% fr)  stance ik {sc['ik_resid_stance_max'] * 100:.1f}cm"
             + (f"  joints {sc['joint_speed_max']:.0f} rad/s (src {sc['src_joint_speed_max']:.0f})" if "joint_speed_max" in sc else "")
-            + (f"  unsupported {sc['ghost_run'] * 1000:.0f} ms" if "ghost_run" in sc else ""))
+            + (f"  unsupported {sc['ghost_run'] * 1000:.0f} ms" if "ghost_run" in sc else "")
+            + (f"  tau p99/limit hip {sc['tau99_hip_pitch']:.2f} knee {sc['tau99_knee_pitch']:.2f} ankle {sc['tau99_ankle_pitch']:.2f}" if "tau99_knee_pitch" in sc else ""))
 
 
 def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/terrain_pilot/pilot_meta.csv"), out: Path = Path("logs/terrain_edit"),
          save: Path = Path("data/terrain_pilot/edited"), box_height: float = 0.30, min_run: float = 0.22, margin: float = 0.01, render: bool = True, only: str = "",
-         shard: int = 0, nshards: int = 1) -> None:
+         shard: int = 0, nshards: int = 1, rise: float = 0.0, run: float = 0.0, slow: float = 1.0, tag: str = "", reach: bool = False, follow_support: bool = False) -> None:
+    """``rise`` / ``run`` (m, 0 = fitted): rebuild each staircase with this rise and run (the steps keep their
+    indices, so every stance moves by its step's change). ``slow``: play the source this many times slower
+    first. ``tag`` is appended to the clip names. ``reach``: also move the torso where a leg cannot reach its
+    foothold (``reach_root``; needed for steps much larger than the source's). ``follow_support``: the torso
+    follows the standing foot (``support_offset``) instead of both feet's mean."""
     (out / "clips").mkdir(parents=True, exist_ok=True)
     save.mkdir(parents=True, exist_ok=True)
     m = mujoco.MjModel.from_xml_path(str(get_robot("dash").xml_path()))
@@ -512,6 +586,9 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
             if kind is None:
                 continue
             dat = np.load(f, allow_pickle=True).item()
+            if slow != 1.0:
+                dat["q"], dat["mocap"] = slow_down(dat["q"], slow), slow_down(dat["mocap"], slow)
+            clip = clip + tag
             qpos = to_qpos(dat["q"])[::STEP]
             fe, sp, foot_r, shin_r = track(m, qpos)
             pts, hs, lab, levels, _, stance = recover(fe, foot_r, dt)
@@ -522,9 +599,13 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
             hi = np.maximum(fe[..., :2].reshape(-1, 2).max(0), qpos[:, :2].max(0)) + 0.6
             if kind == "stairs":
                 old, par = fit_stairs(pts, hs, fe, sp, foot_r, shin_r, stance_fit)
-                run = max(par["run"], min_run)
-                new = Profile(old.c, old.d, par["e0"] + par["ks"] * run, old.heights)
-                desc = f"stairs rise {par['rise'] * 100:.1f} cm, run {par['run'] * 100:.1f} -> {run * 100:.1f} cm"
+                run_new = run or max(par["run"], min_run)
+                heights = old.heights
+                if rise:
+                    k = np.concatenate([[par["ks"][0] - 1], par["ks"]])
+                    heights = np.maximum(par["h0"] + k * rise, min(0.0, par["h0"]))
+                new = Profile(old.c, old.d, par["e0"] + par["ks"] * run_new, heights)
+                desc = f"stairs rise {par['rise'] * 100:.1f} -> {(rise or par['rise']) * 100:.1f} cm, run {par['run'] * 100:.1f} -> {run_new * 100:.1f} cm"
             else:
                 old = fit_box(pts, hs, lab, levels, fe, sp, foot_r, shin_r, stance_fit, ((lo[0], hi[0]), (lo[1], hi[1])))
                 if old is None:
@@ -538,12 +619,16 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
             stance = stance_fit | (human & (fe[..., 2] - foot_r - old.h(fe[..., :2]) < 0.03))
             sc0 = scores(old, fe, sp, foot_r, shin_r, stance, np.zeros((len(qpos), 2)))
             dc, rv = foot_offsets(fe, foot_r, stance, old, new, margin)
-            q2, resid = leg_ik(m, qpos, dc, rv)
+            torso = support_offset(dc, stance, dt) if follow_support else None
+            root = reach_root(m, qpos, dc, rv, torso=torso, standing=stance.any(-1)) if reach else None
+            q2, resid = leg_ik(m, qpos, dc, rv, root=root, torso=torso)
             fe2, sp2, _, _ = track(m, q2)
             lift = np.zeros((len(qpos), 2))
             for _ in range(2):  # swing clearance on the edited motion, then re-solve
                 lift = swing_lift(new, fe2, foot_r, stance, dt, lift)
-                q2, resid = leg_ik(m, qpos, dc, rv, lift)
+                if reach:
+                    root = reach_root(m, qpos, dc, rv, lift, root, torso=torso, standing=stance.any(-1))
+                q2, resid = leg_ik(m, qpos, dc, rv, lift, root=root, torso=torso)
                 fe2, sp2, _, _ = track(m, q2)
             stance2 = np.zeros_like(stance)
             for i in range(2):
@@ -551,7 +636,9 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
                     stance2[:, i, e] = stance_mask(fe2[:, i, e], dt, 0.12, 6) | stance[:, i, e]
             sc1 = scores(new, fe2, sp2, foot_r, shin_r, stance2, resid)
             sc1.update(joint_speed(qpos, q2, dt))
-            sc1.update(support_check(m, q2, new, dt))
+            tau = []
+            sc1.update(support_check(m, q2, new, dt, tau_out=tau))
+            sc1.update(torque_use(m, np.asarray(tau)))
             print(f"{clip:42s} {desc}\n    before: {fmt(sc0)}\n    after : {fmt(sc1)}")
             rows.append({"clip": clip, "kind": kind, "terrain": desc, **{f"before_{k}": v for k, v in sc0.items()}, **{f"after_{k}": v for k, v in sc1.items()}})
             lo2 = np.minimum(fe2[..., :2].reshape(-1, 2).min(0), q2[:, :2].min(0)) - 0.6
@@ -563,7 +650,7 @@ def main(raw: Path = Path("data/terrain_pilot/raw"), meta: Path = Path("data/ter
                 idx = {n: i for i, n in enumerate(jn)}
                 bones = [(idx[a], idx[b]) for a, b in dat["skeleton"] if a in HUMAN_BONES and b in HUMAN_BONES]
                 # The human overlay gets the same torso shift, so it stays on the robot.
-                mocap = dat["mocap"][::STEP] + dc.mean(1)[:, None]
+                mocap = dat["mocap"][::STEP] + (q2[:, None, :3] - qpos[:, None, :3])
                 render_clip(f"dash_{clip}", f"edited: {desc}", q2, mocap, bones, H, origin, new.d, f"after: {fmt(sc1)[:70]}", out / "clips" / f"{clip}.mp4")
         except Exception as e:  # keep going; the clip is reported as failed
             print(f"{f.stem}: FAILED {type(e).__name__}: {e}")

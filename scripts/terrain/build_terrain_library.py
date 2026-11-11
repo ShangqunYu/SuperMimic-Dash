@@ -107,7 +107,7 @@ def main(manifest: Path = Path("data/terrain/manifest.csv"), out: Path = Path("d
             lat0 = (qpos[t, :2] - z["c"]) @ perp
             o = z["c"] + (s_lo + s_hi) / 2 * d + lat0 * perp
             depth = float(s_hi - s_lo)
-            key = f"jump_h{round(h * 100)}_d{round(depth * 100)}"
+            key = f"jump_h{round(h * 100)}_d{round(depth * 100)}" + (f"_w{round(w * 100)}" if abs(w - 0.6) > 1e-6 else "")
             tiles.setdefault(key, [box(-depth / 2, depth / 2, -w / 2, w / 2, 0.0, h)])
         ref = resample(to_tile_frame(qpos, o, d), fps)
         names.append(f"dash_{r['clip']}")
