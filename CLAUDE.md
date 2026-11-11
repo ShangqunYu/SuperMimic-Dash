@@ -467,12 +467,15 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   |---|---|---|---|---|---|
   | dash_teacher 18k (v3 lib) | 1,172, 0.494 | 30, 0.860 | 40, 0.877 | 186, 0.622 | 142, 0.572 |
   | dash_teacher_v4 10k (18k + 10k on v4) | 1,088, 0.480 | 27, 0.843 | 33, 0.877 | 65, 0.796 | 10, 0.703 |
+  | dash_teacher_v4 30k | 908, 0.511 | 8, 0.879 | 13, 0.893 | 8, 0.839 | 3, 0.745 |
 
   US stair failures by riser (12 / 15 / 17.8 / 20 cm), 18k -> v4 10k: up 19/36 -> 9, 22/36 -> 18, 29/31 -> 13,
   11/11 -> 6; down 20/50 -> 0, 21/46 -> 1, 26/48 -> 8, 38/48 -> 10. Box jumps by height (25 / 28 / 31 cm):
   35/120 -> 3, 44/108 -> 1, 63/108 -> 6. Stairs up stay the weak spot; failures by source take (all sizes):
   A300 001 3/13, 002 8/22, 003 8/18; A301 101 5/18, 102 11/23, 103 11/20 (102/103 have the highest reference
   hip torque).
+  At v4 30k: stairs down 0 failures at every riser; up 0/36, 1/36, 3/31, 4/11 (12 / 15 / 17.8 / 20 cm). Box
+  jumps 0/120, 1/108, 2/108. Training return 0.600 at 30.8k (2.8 it/s).
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
