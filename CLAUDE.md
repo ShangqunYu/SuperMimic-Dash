@@ -406,6 +406,18 @@ update, 10x2048 8-step WM windows, H = 32, gamma/lambda, reward terms, network s
   PARC failures new / old: running 208 / 611 (of 1,643), platform 166 / 376 (604), stairs 60 / 147 (198), vault
   56 / 131 (228), jumps 15 / 10 (26), PARC-generated 891 / 1,314 (1,982). v3 box come-up 29 / 1,299. WM at 10k:
   nse8 0.064 / 0.101, terrain nse8 0.16 / 0.19.
+- **Blind vs terrain-seeing policy, 10k each** (2026-11-11, `dash_ab_blind`: same code and flags as `dash_ab_new`
+  but no `--env.policy-scan`; world model and critic still get the scan; GPU 1, from scratch). Failures, mean score:
+
+  | | PARC (4,681) | v3 terrain (2,402) | flat sample (2,000) |
+  |---|---|---|---|
+  | seeing (`dash_ab_new`) | 1,396, 0.461 | 68, 0.839 | 48, 0.847 |
+  | blind (`dash_ab_blind`) | 1,855, 0.464 | 50, 0.830 | 27, 0.863 |
+
+  PARC failures blind / seeing: jumps 25 / 15 (of 26), stairs 102 / 60 (198), platform 224 / 166 (604), running
+  306 / 208 (1,643), vault 61 / 56 (228), PARC-generated 1,137 / 891 (1,982); 1,131 fail under both, 724 only
+  blind, 265 only seeing. The scan pays off on PARC (big level changes, gaps, jumps); on v3 terrain and flat
+  motions blind is as good or better (one seed each, so ~20-clip differences are within noise).
 
 ## PARC terrain data (2026-11-08, lab server)
 
