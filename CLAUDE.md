@@ -418,6 +418,16 @@ update, 10x2048 8-step WM windows, H = 32, gamma/lambda, reward terms, network s
   306 / 208 (1,643), vault 61 / 56 (228), PARC-generated 1,137 / 891 (1,982); 1,131 fail under both, 724 only
   blind, 265 only seeing. The scan pays off on PARC (big level changes, gaps, jumps); on v3 terrain and flat
   motions blind is as good or better (one seed each, so ~20-clip differences are within noise).
+- **Direction (2026-11-11): terrain-seeing teacher.** Targets: jumping over a small box, stairs up and down.
+  Stairs are where the scan helped most (PARC stairs 60 vs 102 failures of 198); box jump-over is too thin to
+  tell (v3 jump-over + avoid-obstacle 22 clips: seeing 11, blind 8 failures). A scan teacher keeps every deploy
+  layout open (elevation map + teacher, depth student tracker, end-to-end depth student); a blind tracker only
+  fits generator -> blind tracker. **Run `dash_teacher`**: resume of `dash_ab_new` 10k -> 100k, same flags, GPU 0,
+  started 2026-11-11, 2.9 it/s, log `logs/dash_teacher.out`; benchmark at 30k (`logs/ab_eval/teacher_30k.json`).
+  - Library coverage for the targets is thin: stairs have two riser heights (v3 11-12.6 cm, 26 clips on 13
+    terrains; PARC 13.5 cm, 198 clips), all about 0.7-0.87 m total climb; box jump-over is 14 clips on one 25 cm
+    box (+ 14 avoid-obstacle clips on 3 terrains). v3 stair clips replay cleanly on their terrain (kinematic
+    penetration <= 2.1 cm); the stairs-up failures are long climbs failing late (step 110-275 of 230-314).
 
 ## PARC terrain data (2026-11-08, lab server)
 
