@@ -1,4 +1,5 @@
-"""World model: learned dynamics + learned termination head + analytic observation/reward heads."""
+"""World model: learned dynamics + termination (analytic soft threshold, or a learned head) + analytic
+observation/reward heads."""
 
 from __future__ import annotations
 
@@ -16,8 +17,15 @@ from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
 @dataclass
 class WorldModelCfg:
     hidden: tuple[int, ...] = (2048, 2048, 2048)
+    act: str = "gelu"  # official SuperMimic: Linear -> LayerNorm -> GELU; legacy: silu, no LayerNorm
+    layer_norm: bool = True
+    input_norm: bool = True  # running mean/std of the state features and the action (updated from sim data)
     term_hidden: tuple[int, ...] = (64, 64)
     state_spec: StateSpecCfg = field(default_factory=StateSpecCfg)
+    # "analytic" (official): P(terminal) = sigmoid((max(|dh| / 0.25, |dtilt| / 0.8) - 1) / softness), no loss.
+    # "learned": the TerminationHead below, fitted with BCE on the sim's labels (weight term_loss_weight).
+    termination: str = "analytic"
+    termination_softness: float = 0.05
     term_loss_weight: float = 1.0
     height_threshold: float = 0.25
     tilt_threshold: float = 0.8
@@ -43,7 +51,8 @@ class WorldModel(nn.Module):
         self.cfg = cfg
         self.num_joints = heads.num_joints
         self.spec = spec = StateSpec(cfg.state_spec, device, self.num_joints)
-        self.dynamics = DynamicsMLP(spec.feat_dim, self.num_joints, spec.ctx_dim, spec.delta_dim, hidden=cfg.hidden)
+        self.dynamics = DynamicsMLP(spec.feat_dim, self.num_joints, spec.ctx_dim, spec.delta_dim, hidden=cfg.hidden, act=cfg.act, layer_norm=cfg.layer_norm, input_norm=cfg.input_norm)
+        assert cfg.termination in ("analytic", "learned"), cfg.termination
         if spec.height_scan:
             from supermimic.terrain.height_scan import HeightScan
 
@@ -77,21 +86,37 @@ class WorldModel(nn.Module):
         delta = self.dynamics(feat, action, self.context(s, xi))
         return self.spec.integrate(s, delta)
 
+    @torch.no_grad()
+    def update_normalization(self, s: torch.Tensor, a_exec: torch.Tensor) -> None:
+        """Fold freshly collected states (…, 13+2NJ) and executed actions into the input normalisers."""
+        self.dynamics.update_normalization(self.spec.canonical(s), a_exec)
+
+    def _term_logits(self, feats: torch.Tensor) -> torch.Tensor:
+        if self.cfg.termination == "learned":
+            return self.term_head(feats)
+        c = self.cfg
+        x = torch.maximum(feats[..., 0].abs() / c.height_threshold, feats[..., 1].abs() / c.tilt_threshold)
+        return (x - 1.0) / c.termination_softness
+
     def termination_logits(self, s_next: torch.Tensor, ref: ReferenceFrame) -> torch.Tensor:
         # The pelvis is the free-joint body, so its pose is the state's root pose: no FK needed.
         feats = self.heads.termination_features(s_next[..., 0:3], s_next[..., 3:7], ref)
-        return self.term_head(feats)
+        return self._term_logits(feats)
 
     # ------------------------------------------------------------------ Eq. 1
 
     def _loss_step(self, s, a, xi, s_true, done, ref_root_pos, ref_root_quat):
-        """One autoregressive step of Eq. 1: returns (s_next, sq_err (n,12+2NJ), term_bce (n,), logits (n,))."""
+        """One autoregressive step of Eq. 1: returns (s_next, state loss (n,), nse (n,), term_bce (n,), logits (n,))."""
         s_next = self.step(s, a, xi)
-        e = self.spec.error_vector(s_next, s_true)
+        loss = self.spec.loss_per_sample(s_next, s_true)
+        nse = self.spec.normalized_sq_error(s_next, s_true).detach()
         feats = self.heads.termination_features(s_next[..., 0:3], s_next[..., 3:7], ReferenceFrame(None, None, None, None, ref_root_pos, ref_root_quat))
-        logits = self.term_head(feats)
-        bce = F.binary_cross_entropy_with_logits(logits, done, reduction="none")
-        return s_next, e * e, bce, logits
+        logits = self._term_logits(feats)
+        if self.cfg.termination == "learned":
+            bce = F.binary_cross_entropy_with_logits(logits, done, reduction="none")
+        else:
+            bce = F.binary_cross_entropy_with_logits(logits.detach(), done, reduction="none")  # diagnostic only
+        return s_next, loss, nse, bce, logits
 
     def enable_compile(self, mode: str | None = "default") -> None:
         self._loss_step_fn = torch.compile(self._loss_step, mode=None if mode == "default" else mode, dynamic=False) if mode else self._loss_step
@@ -114,16 +139,18 @@ class WorldModel(nn.Module):
         acc_num = 0.0
         step_fn = getattr(self, "_loss_step_fn", None) or self._loss_step
         for j in range(k):
-            s, sq, bce, logits = step_fn(s, a_exec[j], xi, states[j + 1], done[j], refs[j].root_pos_w, refs[j].root_quat_w)
-            total_state = total_state + sq.sum(-1).mean()
+            s, sl, nse_n, bce, logits = step_fn(s, a_exec[j], xi, states[j + 1], done[j], refs[j].root_pos_w, refs[j].root_quat_w)
+            total_state = total_state + sl.mean()
             total_term = total_term + (bce.mean() if term_weight is None else (bce * term_weight).sum() / term_weight.sum().clamp_min(1.0))
             with torch.no_grad():
-                nse = sq.mean(-1).mean()
+                nse = nse_n.mean()
                 if j == 0:
                     err_first = nse
                 err_last = nse
                 acc_num += ((logits > 0).float() == done[j]).float().mean()
-        loss = total_state / k + self.cfg.term_loss_weight * total_term / k
+        loss = total_state / k
+        if self.cfg.termination == "learned":
+            loss = loss + self.cfg.term_loss_weight * total_term / k
         # Metrics stay on-device (detached tensors): a float() here would stall the CPU on the
         # forward pass every minibatch, which in data-parallel runs turns into lockstep waiting.
         metrics.update(

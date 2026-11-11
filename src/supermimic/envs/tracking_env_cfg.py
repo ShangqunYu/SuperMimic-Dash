@@ -2,7 +2,8 @@
 
 Differences from mjlab's BeyondMimic re-implementation (``mjlab.tasks.tracking``):
   * observations: paper Table A.1 proprioception only (no anchor pose, no base lin vel),
-    10-frame history (term-major), plus a separate ``goal`` group with K future frames;
+    10-frame history (term-major), plus a separate ``goal`` group with K future frames
+    (``goal_stride`` steps apart) and optionally their root orientation relative to the robot;
   * action: ``NoisyJointPositionAction`` (clean action observed, noise only executed);
   * multi-clip command with return-based reset sampling and clip-end time-outs;
   * rewards: self-collision term removed, joint-limit weight -2;
@@ -55,6 +56,10 @@ class SuperMimicEnvCfgArgs:
     robot: str = "g1"  # supermimic.robots name
     num_envs: int = 4096
     future_frames: int = 10
+    goal_stride: int = 1  # control steps between goal frames (official SuperMimic: 5, ~0.9 s ahead)
+    # Each goal frame's reference root orientation in the robot root frame (rot6d, 6 per frame) after the
+    # future-frame features: the robot's own attitude and heading drift (needs only the IMU, no position).
+    goal_root_ori: bool = False
     history_length: int = 10
     episode_length_s: float = 10.0
     action_noise_std: float = 0.1
@@ -113,6 +118,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         "goal": ObservationGroupCfg(
             terms={
                 "future_frames": ObservationTermCfg(func=sm_obs.goal_future_frames, params={"command_name": "motion"}),
+                **({"root_ori": ObservationTermCfg(func=sm_obs.goal_root_ori, params={"command_name": "motion"})} if a.goal_root_ori else {}),
                 **(
                     {
                         "anchor_pos": ObservationTermCfg(func=track_mdp.motion_anchor_pos_b, params={"command_name": "motion"}, noise=noise(-0.25, 0.25)),
@@ -154,6 +160,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             body_names=robot.tracked_bodies,
             entity_name="robot",
             future_frames=a.future_frames,
+            goal_stride=a.goal_stride,
             bin_frames=a.bin_frames,
             pose_range=pose_range if a.reset_noise else {},
             velocity_range=vel_range if a.reset_noise else {},

@@ -29,7 +29,7 @@ import tyro
 from PIL import Image, ImageDraw, ImageFont
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
-from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoint
 from supermimic.robots import get_robot
 
 def scene_model(xml: Path, width: int, height: int) -> mujoco.MjModel:
@@ -64,9 +64,9 @@ def simulate(ckpt: Path, files: list[str], seconds: float, fps: int, device: str
     n = len(files)
     env = make_env(
         SuperMimicEnvCfgArgs(
-            npz_files=files, robot=robot, num_envs=n, future_frames=cfg["env"]["future_frames"], episode_length_s=1.0e5,
+            npz_files=files, robot=robot, num_envs=n, **goal_env_kwargs(cfg), episode_length_s=1.0e5,
             action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False, sampling_mode="start",
-            record_transitions=False, seed=0, anchor_obs=cfg["env"].get("anchor_obs", False),
+            record_transitions=False, seed=0,
         ),
         device=device,
     )

@@ -16,7 +16,7 @@ from pathlib import Path
 import torch
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
-from supermimic.policy.nets import Policy, PolicyCfg
+from supermimic.policy.nets import LEGACY_POLICY_CFG, Policy, PolicyCfg
 
 
 @dataclass
@@ -32,7 +32,7 @@ class ClipResult:
 
 def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, dict]:
     ck = torch.load(path, map_location=device, weights_only=False)
-    pc = ck["config"]["policy"]
+    pc = {**LEGACY_POLICY_CFG, **ck["config"]["policy"]}
     pcfg = PolicyCfg(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in pc.items()})
     policy = Policy(pcfg).to(device)
     policy.load_state_dict(ck["policy"])
@@ -40,8 +40,16 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
     return policy, ck["config"]
 
 
+def goal_env_kwargs(config: dict) -> dict:
+    """SuperMimicEnvCfgArgs fields that set a checkpoint's goal layout, from its saved config (older
+    checkpoints lack the newer fields: consecutive goal frames, no root orientation, no terrain scan)."""
+    e = config["env"]
+    return dict(future_frames=e["future_frames"], goal_stride=e.get("goal_stride", 1), goal_root_ori=e.get("goal_root_ori", False),
+                anchor_obs=e.get("anchor_obs", False), policy_scan=e.get("policy_scan", False))
+
+
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1", num_clips: int | None = None, randomize: bool = False) -> list[ClipResult]:
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1", num_clips: int | None = None, randomize: bool = False, goal_stride: int = 1, goal_root_ori: bool = False, policy_scan: bool = False) -> list[ClipResult]:
     """``npz_files`` may be one packed .pt library; then ``num_clips`` (its clip count) sizes the env batch.
     ``randomize`` turns on the training randomization (observation noise, sim and hardware DR; same seed for every policy)."""
     packed = len(npz_files) == 1 and str(npz_files[0]).endswith(".pt")
@@ -61,6 +69,9 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         record_transitions=False,
         seed=0,
         anchor_obs=anchor_obs,
+        goal_stride=goal_stride,
+        goal_root_ori=goal_root_ori,
+        policy_scan=policy_scan,
         compact_library=packed,
     )
     env = make_env(args, device=device)

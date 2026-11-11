@@ -105,7 +105,7 @@ def test_decode_frozen_reaches_encoder_only():
     obs = torch.randn(4, cfg.obs_dim)
     z = p.encoders["velocity"](torch.randn(4, 3), obs)
     a = p.decode_frozen(z, obs)
-    torch.testing.assert_close(a, p.decoder(z, obs))
+    torch.testing.assert_close(a, p.decoder(z, p._obs(obs)))
     a.sum().backward()
     assert all(q.grad is None for q in p.decoder.parameters())
     assert all(q.grad is None for q in p.encoders["motion"].parameters())

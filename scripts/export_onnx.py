@@ -14,12 +14,15 @@ Same interface as mjlab_dash's tracking export (MotionTrackingOnPolicyRunner):
 
   inputs : obs (1, obs_dim)    proprioceptive history, the env's "policy" group
            time_step (1, 1)    control steps since the clip started (50 Hz), clamped at the clip end
+           root_quat (1, 4)    only for checkpoints trained with env.goal_root_ori: torso orientation (wxyz) from
+                               the IMU, yaw aligned to the reference's heading at time_step 0
   outputs: actions (1, NJ)     joint target = default_joint_pos + action_scale * actions
            joint_pos, joint_vel, body_pos_w, body_quat_w, body_lin_vel_w, body_ang_vel_w
                                the reference at time_step (for logging / initialization)
 
 The policy's goal input (K future reference frames) depends only on the reference, so it is
-precomputed per frame and stored in the file; the robot only supplies obs and time_step.
+precomputed per frame and stored in the file; the robot only supplies obs and time_step (and, with
+goal_root_ori, its root orientation: the goal frames' orientation relative to it is computed in the graph).
 
 obs layout (term-major, each term's history oldest -> newest, 10 frames):
   joint_pos - default (NJ) | joint_vel (NJ) | base_ang_vel (3, body frame) | projected_gravity (3) | last action (NJ)
@@ -41,22 +44,40 @@ import tyro
 from torch import nn
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
-from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoint
 
 
 class OnnxMotionPolicy(nn.Module):
-    def __init__(self, policy: nn.Module, goal: torch.Tensor, ref: dict[str, torch.Tensor]):
+    """Goal features precomputed per frame. With ``ref_root_quat`` (checkpoints with env.goal_root_ori) the goal
+    also needs the robot's root orientation (third input ``root_quat`` (1, 4) wxyz): the goal frames' reference
+    root orientation in the robot root frame is computed in the graph."""
+
+    def __init__(self, policy: nn.Module, goal: torch.Tensor, ref: dict[str, torch.Tensor], ref_root_quat: torch.Tensor | None = None, goal_frames: int = 10, goal_stride: int = 1):
         super().__init__()
         self.policy = policy
         self.register_buffer("goal", goal)
         for k, v in ref.items():
             self.register_buffer(k, v)
         self.time_step_total = int(goal.shape[0])
+        self.root_ori = ref_root_quat is not None
+        if self.root_ori:
+            self.register_buffer("ref_root_quat", ref_root_quat)
+            self.register_buffer("offsets", torch.arange(goal_frames) * goal_stride)
 
-    def forward(self, obs: torch.Tensor, time_step: torch.Tensor):
+    def _goal(self, t: torch.Tensor, root_quat: torch.Tensor | None) -> torch.Tensor:
+        if not self.root_ori:
+            return self.goal[t]
+        from supermimic.kinematics.rotations import quat_inv, quat_mul, rot6d_from_quat
+
+        idx = torch.clamp(t[:, None] + self.offsets[None, :], max=self.time_step_total - 1)
+        q_ref = self.ref_root_quat[idx]  # (1, K, 4)
+        q_rel = quat_mul(quat_inv(root_quat)[:, None, :].expand_as(q_ref), q_ref)
+        return torch.cat([self.goal[t], rot6d_from_quat(q_rel).reshape(t.shape[0], -1)], dim=-1)
+
+    def forward(self, obs: torch.Tensor, time_step: torch.Tensor, root_quat: torch.Tensor | None = None):
         t = torch.clamp(time_step.long().squeeze(-1), min=0, max=self.time_step_total - 1)
         return (
-            self.policy(obs, self.goal[t]),
+            self.policy(obs, self._goal(t, root_quat)),
             self.joint_pos[t],
             self.joint_vel[t],
             self.body_pos_w[t],
@@ -130,6 +151,8 @@ def metadata(env, ckpt: Path, clip: str, frames: int, cfg: dict) -> dict:
         "anchor_body_name": cmd.cfg.anchor_body_name,
         "body_names": list(cmd.cfg.body_names),
         "future_frames": cfg["env"]["future_frames"],
+        "goal_stride": cfg["env"].get("goal_stride", 1),
+        "goal_root_ori": cfg["env"].get("goal_root_ori", False),
     }
 
 
@@ -144,7 +167,7 @@ def export_velocity(ckpt: Path, npz_dir: Path, out_dir: Path, check_steps: int, 
     v = cfg["velocity"]
     env = make_env(
         SuperMimicEnvCfgArgs(
-            npz_files=[str(npz_dir / f"{start_clip}.npz")], robot=cfg.get("robot", "g1"), num_envs=n, future_frames=cfg["env"]["future_frames"],
+            npz_files=[str(npz_dir / f"{start_clip}.npz")], robot=cfg.get("robot", "g1"), num_envs=n, **goal_env_kwargs(cfg),
             episode_length_s=1.0e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
             sampling_mode="start", record_transitions=True, replay_capacity=4, seed=0, fall_height=v["fall_height"], fall_tilt=v["fall_tilt"],
         ),
@@ -209,9 +232,10 @@ def export_goal(ckpt: Path, npz_dir: Path, out_dir: Path, check_steps: int, plan
 
     policy, cfg = load_policy_from_checkpoint(ckpt, "cuda:0")
     assert not cfg["env"].get("anchor_obs", False), "goal interface needs a proprioception-only policy"
+    assert not cfg["env"].get("goal_root_ori", False), "goal interface: the planner's goal has no root orientation term"
     env = make_env(
         SuperMimicEnvCfgArgs(
-            npz_files=[str(npz_dir / f"{start_clip}.npz")], robot=cfg.get("robot", "g1"), num_envs=1, future_frames=cfg["env"]["future_frames"],
+            npz_files=[str(npz_dir / f"{start_clip}.npz")], robot=cfg.get("robot", "g1"), num_envs=1, **goal_env_kwargs(cfg),
             episode_length_s=1.0e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
             sampling_mode="start", record_transitions=False, seed=0,
         ),
@@ -282,10 +306,10 @@ def main(
     n = len(files)
     env = make_env(
         SuperMimicEnvCfgArgs(
-            npz_files=files, robot=cfg.get("robot", "g1"), num_envs=n, future_frames=cfg["env"]["future_frames"],
+            npz_files=files, robot=cfg.get("robot", "g1"), num_envs=n, **goal_env_kwargs(cfg),
             history_length=cfg["env"].get("history_length", 10), episode_length_s=1.0e5, action_noise_std=0.0,
             obs_noise=False, reset_noise=False, domain_randomization=False, sampling_mode="start",
-            record_transitions=False, seed=0, anchor_obs=cfg["env"].get("anchor_obs", False),
+            record_transitions=False, seed=0,
         ),
         device="cuda:0",
     )
@@ -294,6 +318,8 @@ def main(
         cmd = env.command_manager.get_term("motion")
         lib = cmd.library
         K = cfg["env"]["future_frames"]
+        stride = cfg["env"].get("goal_stride", 1)
+        root_ori = cfg["env"].get("goal_root_ori", False)
         cmd.forced_frame[:] = lib.clip_start[:n]
         obs, _ = env.reset()
         cpu_policy, _ = load_policy_from_checkpoint(ckpt, "cpu")
@@ -303,12 +329,17 @@ def main(
             frames = torch.arange(int(lib.clip_start[i]), int(lib.clip_last[i]) + 1, device=lib.device)
             r, b = lib.ref(frames), lib.bodies(frames)
             ref = {"joint_pos": r.joint_pos, "joint_vel": r.joint_vel, "body_pos_w": b.pos_w, "body_quat_w": b.quat_w, "body_lin_vel_w": b.lin_vel_w, "body_ang_vel_w": b.ang_vel_w}
-            model = OnnxMotionPolicy(cpu_policy, lib.goal_window(frames, K).float().cpu(), {k: v.float().cpu() for k, v in ref.items()}).eval()
+            model = OnnxMotionPolicy(cpu_policy, lib.goal_window(frames, K, stride).float().cpu(), {k: v.float().cpu() for k, v in ref.items()},
+                                     r.root_quat_w.float().cpu() if root_ori else None, K, stride).eval()
             path = out_dir / f"{clip}.onnx"
-            torch.onnx.export(model, (torch.zeros(1, obs["policy"].shape[1]), torch.zeros(1, 1)), str(path), export_params=True,
-                              opset_version=18, input_names=["obs", "time_step"], output_names=OUTPUTS, dynamic_axes={}, dynamo=False)
+            inputs = (torch.zeros(1, obs["policy"].shape[1]), torch.zeros(1, 1)) + ((torch.tensor([[1.0, 0.0, 0.0, 0.0]]),) if root_ori else ())
+            torch.onnx.export(model, inputs, str(path), export_params=True, opset_version=18,
+                              input_names=["obs", "time_step"] + (["root_quat"] if root_ori else []), output_names=OUTPUTS, dynamic_axes={}, dynamo=False)
             m = onnx.load(str(path))
             meta = metadata(env, ckpt, clip, len(frames), cfg)
+            if root_ori:
+                meta["root_quat_input"] = ("robot root (torso) orientation, wxyz, in the reference's world frame: IMU attitude with "
+                                           "its yaw offset set so the robot's heading equals the reference's at time_step 0")
             for k, v in meta.items():
                 m.metadata_props.append(onnx.StringStringEntryProto(key=k, value=_csv(v)))
             onnx.save(m, str(path))
@@ -330,8 +361,12 @@ def main(
             a_cpu = cpu_policy(obs["policy"].cpu(), obs["goal"].cpu()).numpy()
             t = (cmd.frame[:n] - lib.clip_start[:n]).cpu().numpy()
             o = obs["policy"].cpu().numpy()
+            rq = cmd.robot_root_quat_w[:n].cpu().numpy().astype(np.float32)
             for i, s in enumerate(sessions):
-                a = s.run(["actions"], {"obs": o[i : i + 1], "time_step": np.array([[t[i]]], dtype=np.float32)})[0]
+                feed = {"obs": o[i : i + 1], "time_step": np.array([[t[i]]], dtype=np.float32)}
+                if root_ori:
+                    feed["root_quat"] = rq[i : i + 1]
+                a = s.run(["actions"], feed)[0]
                 err[i] = max(err[i], float(np.abs(a - a_cpu[i : i + 1]).max()))
             obs, _, term, _, _ = env.step(policy(obs["policy"], obs["goal"]))
             falls += term.cpu().numpy()

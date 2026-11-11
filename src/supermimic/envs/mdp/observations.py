@@ -17,6 +17,12 @@ def goal_future_frames(env: ManagerBasedRlEnv, command_name: str) -> torch.Tenso
     return command.goal
 
 
+def goal_root_ori(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+    """(N, 6K) the goal frames' reference root orientation in the robot root frame (rot6d)."""
+    command = cast(MultiClipMotionCommand, env.command_manager.get_term(command_name))
+    return command.goal_root_ori
+
+
 class policy_terrain:
     """(N, POLICY_SCAN_DIM) teacher terrain input: root height above the POLICY_GRID points of the env's
     terrain (supermimic/terrain/height_scan.py), the same function the imagined rollouts use."""

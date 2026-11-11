@@ -20,7 +20,7 @@ def test_state_spec_identity_and_errors():
     from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
 
     dev = "cpu"
-    spec = StateSpec(StateSpecCfg(explicit_integration=False), dev, 29, torch.float64)
+    spec = StateSpec(StateSpecCfg(explicit_integration=False, delta="legacy"), dev, 29, torch.float64)
     s = _random_states(64, dev, torch.float64)
     s2 = spec.integrate(s, torch.zeros(64, 70, dtype=torch.float64))
     np.testing.assert_allclose(s2.numpy(), s.numpy(), atol=1e-12)
@@ -36,10 +36,40 @@ def test_state_spec_identity_and_errors():
     s_rot[:, 36:39] = quat_apply(qy, s[:, 36:39])
     np.testing.assert_allclose(spec.canonical(s_rot).numpy(), spec.canonical(s).numpy(), atol=1e-9)
     # Explicit integration with zero delta = constant-velocity extrapolation.
-    spec2 = StateSpec(StateSpecCfg(explicit_integration=True), dev, 29, torch.float64)
+    spec2 = StateSpec(StateSpecCfg(explicit_integration=True, delta="legacy"), dev, 29, torch.float64)
     s3 = spec2.integrate(s, torch.zeros(64, 70, dtype=torch.float64))
     np.testing.assert_allclose(s3[:, 0:3].numpy(), (s[:, 0:3] + 0.02 * s[:, 36:39]).numpy(), atol=1e-12)
     np.testing.assert_allclose(s3[:, 7:36].numpy(), (s[:, 7:36] + 0.02 * s[:, 42:71]).numpy(), atol=1e-12)
+
+
+def test_state_spec_accel_integration_and_loss():
+    """Acceleration-only output (official): zero delta = constant velocity; a velocity increment moves the pose
+    by the substep-averaged velocity v + c dv, c = 5/8 for 4 substeps; the official loss scores pose errors."""
+    from supermimic.kinematics.rotations import quat_from_rotvec, quat_mul
+    from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
+
+    dev = "cpu"
+    spec = StateSpec(StateSpecCfg(), dev, 29, torch.float64)
+    assert spec.delta_dim == 6 + 29 and abs(spec.substep_coeff - 0.625) < 1e-12
+    s = _random_states(64, dev, torch.float64)
+    s0 = spec.integrate(s, torch.zeros(64, 35, dtype=torch.float64))
+    np.testing.assert_allclose(s0[:, 0:3].numpy(), (s[:, 0:3] + 0.02 * s[:, 36:39]).numpy(), atol=1e-12)
+    np.testing.assert_allclose(s0[:, 39:].numpy(), s[:, 39:].numpy(), atol=1e-12)
+    d = torch.zeros(64, 35, dtype=torch.float64)
+    d[:, 6:] = 1.0  # joint velocity increment of out_scale[dqd] = 2 rad/s per step
+    s1 = spec.integrate(s, d)
+    dqd = spec.out_scale[6]
+    np.testing.assert_allclose(s1[:, 42:71].numpy(), (s[:, 42:71] + dqd).numpy(), atol=1e-12)
+    np.testing.assert_allclose(s1[:, 7:36].numpy(), (s[:, 7:36] + 0.02 * (s[:, 42:71] + 0.625 * dqd)).numpy(), atol=1e-12)
+    # Official loss: zero at the truth; a 0.01 rad roll error alone gives (0.01 / 0.02)^2 / (12 + 2 NJ).
+    assert spec.loss_per_sample(s, s).max() < 1e-20
+    s_rot = s.clone()
+    s_rot[:, 3:7] = quat_mul(s[:, 3:7], quat_from_rotvec(torch.tensor([[0.01, 0.0, 0.0]], dtype=torch.float64).expand(64, 3)))
+    np.testing.assert_allclose(spec.loss_per_sample(s_rot, s).numpy(), (0.5**2) / 70, rtol=1e-6)
+    # Root velocity errors are not scored directly.
+    s_v = s.clone()
+    s_v[:, 36:42] += 1.0
+    assert spec.loss_per_sample(s_v, s).max() < 1e-20
 
 
 @pytest.mark.skipif(not torch.cuda.is_available() or not NPZ.exists(), reason="needs CUDA + LAFAN1 npz")

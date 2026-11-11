@@ -10,6 +10,7 @@ from supermimic.data.replay_buffer import ReplayBuffer, WindowBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.world_model.heads import ReferenceFrame
 from supermimic.training.distributed import allreduce_grads
+from supermimic.training.optim import Optimizers
 from supermimic.world_model.world_model import WorldModel
 
 
@@ -21,6 +22,7 @@ class WMTrainerCfg:
     lr: float = 2e-4
     grad_clip: float = 1.0
     weight_decay: float = 0.0
+    muon: bool = True  # official SuperMimic: Muon on the hidden Linear weights, Adam on the rest
     compile: str | None = "default"
 
 
@@ -36,12 +38,11 @@ class WorldModelTrainer:
         self.lib = lib
         self.cfg = cfg
         self.track_mask: torch.Tensor | None = None  # (E,) envs whose termination labels are reference-relative
-        self.opt = torch.optim.Adam(wm.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        self.opt = Optimizers([wm], cfg.lr, weight_decay=cfg.weight_decay, muon=cfg.muon)
         wm.enable_compile(cfg.compile)
 
     def set_lr(self, lr: float) -> None:
-        for g in self.opt.param_groups:
-            g["lr"] = lr
+        self.opt.set_lr(lr)
 
     def loss_on(self, w: WindowBatch):
         k, n = w.frame.shape

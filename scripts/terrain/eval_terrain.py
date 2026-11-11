@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
-from supermimic.eval.benchmark import load_policy_from_checkpoint, run_benchmark, summarize
+from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoint, run_benchmark, summarize
 
 
 def group(name: str) -> str:
@@ -38,7 +38,7 @@ def rollout_video(ckpt: Path, lib: Path, clips: list[str], out: Path, device: st
     """Policy rollouts of ``clips`` on their tiles, 3 per row; with ``ghost`` the reference is drawn
     as a translucent copy of the robot. ``notes`` are appended to each clip's label."""
     policy, pcfg = load_policy_from_checkpoint(ckpt, device)
-    env = make_env(SuperMimicEnvCfgArgs(npz_files=[str(lib)], robot="dash", num_envs=len(clips), compact_library=True, future_frames=pcfg["env"]["future_frames"],
+    env = make_env(SuperMimicEnvCfgArgs(npz_files=[str(lib)], robot="dash", num_envs=len(clips), compact_library=True, **goal_env_kwargs(pcfg),
                                         episode_length_s=1.0e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
                                         sampling_mode="start", seed=0), device=device)
     try:
@@ -131,7 +131,7 @@ def main(ckpt: Path = Path("logs/dash_e2_hwdr/ckpt_latest.pt"), lib: Path = Path
     if bench:
         policy, pcfg = load_policy_from_checkpoint(ckpt, device)
         n_clips = len(torch.load(lib, map_location="cpu", weights_only=False)["names"])
-        res = run_benchmark(policy, [str(lib)], device=device, num_envs=num_envs, future_frames=pcfg["env"]["future_frames"], robot="dash", num_clips=n_clips, verbose=False)
+        res = run_benchmark(policy, [str(lib)], device=device, num_envs=num_envs, **goal_env_kwargs(pcfg), robot="dash", num_clips=n_clips, verbose=False)
         by = collections.defaultdict(list)
         for r in res:
             by[group(r.name)].append(r)

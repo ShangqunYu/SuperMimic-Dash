@@ -4,7 +4,8 @@ Exposes the same attribute API as mjlab's ``MotionCommand`` (``anchor_pos_w``,
 ``robot_body_pos_w``, ``body_pos_relative_w`` ...) so mjlab's tracking reward
 functions work unchanged, plus:
 
-* ``goal``        (N, K*(2NJ+10)) future-frame goal features (plan D5)
+* ``goal``        (N, K*(2NJ+10)) future-frame goal features (plan D5), frames ``goal_stride`` apart
+* ``goal_root_ori`` (N, 6K) the goal frames' reference root orientation in the robot root frame
 * ``root_*``      reference pelvis quantities for the paper's root terminations
 * ``clip_end``    (N,) True once the clip's last frame has been reached (time-out)
 * ``track_mask``  (N,) envs that track the reference (default all). The others (velocity
@@ -82,7 +83,7 @@ class MultiClipMotionCommand(CommandTerm):
 
         # Return-based reset sampling state.
         self.bin_return = torch.full((lib.num_bins,), cfg.g_max, device=self.device)
-        self.bin_memory = torch.full((lib.num_bins,), 1.0 / lib.num_bins, device=self.device)
+        self.bin_memory = torch.full((lib.num_bins,), 1.0 / lib.num_bins, dtype=torch.float64, device=self.device)
         # Bins of terrain clips, for the guaranteed terrain share of resets (cfg.terrain_ratio).
         self.terrain_bin = lib.clip_tile[lib.frame_clip[lib.bin_start]] >= 0
         self.max_ep_steps = min(int(math.ceil(env.cfg.episode_length_s / env.step_dt)) + 2, cfg.max_logged_steps)
@@ -111,7 +112,12 @@ class MultiClipMotionCommand(CommandTerm):
 
     @property
     def goal(self) -> torch.Tensor:
-        return self.library.goal_window(self.frame, self.cfg.future_frames)
+        return self.library.goal_window(self.frame, self.cfg.future_frames, self.cfg.goal_stride)
+
+    @property
+    def goal_root_ori(self) -> torch.Tensor:
+        """(N, 6K) each goal frame's reference root orientation in the robot root frame (rot6d)."""
+        return self.library.goal_root_ori(self.frame, self.cfg.future_frames, self.cfg.goal_stride, self.robot_root_quat_w)
 
     @property
     def joint_pos(self) -> torch.Tensor:
@@ -288,11 +294,16 @@ class MultiClipMotionCommand(CommandTerm):
             return torch.minimum(f, lib.last_frame_of(f) - 2).clamp_min(0)
         assert mode == "return"
         hard = torch.softmax(-cfg.softmax_temp * self.bin_return / cfg.g_max, dim=0)
-        self.bin_memory = (1 - cfg.memory_alpha) * self.bin_memory + cfg.memory_alpha * hard
+        if cfg.memory_mode == "cumulative":
+            # Official SuperMimic: accumulated effort sum(hard^2) over the whole run, so bins that were hard
+            # once keep a share of practice after they are learned.
+            self.bin_memory += hard.square()
+        else:
+            self.bin_memory = (1 - cfg.memory_alpha) * self.bin_memory + cfg.memory_alpha * hard
         p = (
             cfg.uniform_ratio / lib.num_bins
             + cfg.hard_ratio * hard
-            + cfg.memory_ratio * self.bin_memory / self.bin_memory.sum()
+            + cfg.memory_ratio * (self.bin_memory / self.bin_memory.sum()).float()
         )
         p = p / p.sum()
         if cfg.terrain_ratio > 0 and bool(self.terrain_bin.any()):
@@ -488,6 +499,7 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     body_names: tuple[str, ...]
     entity_name: str = "robot"
     future_frames: int = 10
+    goal_stride: int = 1  # control steps between goal frames
     bin_frames: int = 50
     pose_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     velocity_range: dict[str, tuple[float, float]] = field(default_factory=dict)
@@ -504,6 +516,10 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     g_max: float = 10.0
     gamma: float = 0.99
     ema_alpha: float = 0.05
+    # Memory share of the mixture: "cumulative" (official code) = sum over the run of the squared hard
+    # distribution; "ema" = an exponential average of it (memory_alpha per reset batch, which forgets within
+    # ~100 env steps).
+    memory_mode: Literal["cumulative", "ema"] = "cumulative"
     memory_alpha: float = 0.01
     # "horizon": normalize each return-to-go by the horizon it could cover, so bins at the end of a
     # clip are not mistaken for hard ones (matters for libraries of many short clips: on Dash

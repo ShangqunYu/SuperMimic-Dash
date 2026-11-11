@@ -35,6 +35,10 @@ class EnvCfg:
     terrain_ratio: float = 0.0  # share of resets on terrain clips (mixed flat + terrain library)
     replay_capacity: int = 1000
     future_frames: int = 10
+    # Official SuperMimic goal: frames 5 control steps apart (0.9 s lookahead with 10 frames), plus each
+    # frame's reference root orientation relative to the robot's root (IMU attitude only, no position).
+    goal_stride: int = 5
+    goal_root_ori: bool = True
     compact_library: bool = False
     anchor_obs: bool = False
     # Teacher: the policy also sees the terrain around it (terrain/height_scan.py POLICY_GRID, end of the
@@ -48,6 +52,7 @@ class ScheduleCfg:
     updates_per_env_step: float = 0.4  # UTD
     policy_updates_per_wm_update: int = 1
     warmup_iterations: int = 40  # env steps before the first update (fills k-step windows)
+    lr_schedule: str = "constant"  # "constant" (official code) | "cosine" (paper)
     lr_final_ratio: float = 0.03
     lr_decay_fraction: float = 250_000 / 320_000
     log_interval: int = 50  # iterations

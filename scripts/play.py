@@ -22,7 +22,7 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
-from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoint
 
 
 class _DictPolicy:
@@ -52,7 +52,7 @@ def main(
         npz_files=files,
         robot=cfg.get("robot", "g1"),
         num_envs=num_envs,
-        future_frames=cfg["env"]["future_frames"],
+        **goal_env_kwargs(cfg),
         episode_length_s=1.0e5,
         action_noise_std=0.0,
         obs_noise=False,
@@ -61,7 +61,6 @@ def main(
         sampling_mode=sampling,
         record_transitions=False,
         seed=0,
-        anchor_obs=cfg["env"].get("anchor_obs", False),
         debug_vis=ghost,
     )
     env = RslRlVecEnvWrapper(make_env(args, device=device))

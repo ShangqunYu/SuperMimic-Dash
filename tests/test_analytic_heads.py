@@ -182,3 +182,36 @@ def test_anchor_relative_obs_matches_env():
             np.testing.assert_allclose(ours.cpu().numpy(), obs["goal"][:, 680:].cpu().numpy(), atol=3e-5)
     finally:
         env.close()
+
+
+def test_strided_root_ori_goal_matches_env():
+    """With goal_stride / goal_root_ori, the env's goal equals the imagination's goal computed from the state:
+    frames 5 steps apart, then each frame's reference root orientation in the robot's root frame."""
+    if not NPZ.exists():
+        pytest.skip("LAFAN1 npz not built")
+    from supermimic.envs import SuperMimicEnvCfgArgs, make_env
+    from supermimic.envs.mdp.motion_library import discover_npz
+    from supermimic.envs.state_io import StateIO
+    from supermimic.imagination.rollout import motion_goal
+
+    files = discover_npz(NPZ, names=["walk1_subject1"])
+    env = make_env(SuperMimicEnvCfgArgs(npz_files=[str(f) for f in files], num_envs=8, obs_noise=False, reset_noise=False, goal_stride=5, goal_root_ori=True,
+                                        record_transitions=False, seed=4), "cuda:0")
+    try:
+        io = StateIO(env)
+        obs, _ = env.reset()
+        assert obs["goal"].shape == (8, 680 + 60)
+        cmd = env.command_manager.get_term("motion")
+        lib = cmd.library
+        np.testing.assert_allclose(motion_goal(lib, cmd.frame, io.read(), 10, 5, True).cpu().numpy(), obs["goal"].cpu().numpy(), atol=1e-5)
+        # Near the reference after reset: the current frame's relative orientation is close to the identity.
+        eye6 = torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], device=env.device)
+        assert (obs["goal"][:, 680:686] - eye6).abs().max() < 0.1
+        for _ in range(5):
+            obs, *_ = env.step(0.3 * torch.randn(8, 29, device=env.device))
+            ours = motion_goal(lib, cmd.frame, io.read(), 10, 5, True)
+            np.testing.assert_allclose(ours.cpu().numpy(), obs["goal"].cpu().numpy(), atol=1e-5)
+        f = cmd.frame
+        np.testing.assert_allclose(obs["goal"][:, 68:136].cpu().numpy(), lib.goal_feat[torch.minimum(f + 5, lib.last_frame_of(f))].cpu().numpy(), atol=1e-6)
+    finally:
+        env.close()

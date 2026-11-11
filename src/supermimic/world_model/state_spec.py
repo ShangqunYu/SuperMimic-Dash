@@ -9,16 +9,25 @@ Canonical features (network input, heading-invariant, 13 + 2 NJ):
     [root_z(1), rot6d(heading^-1 ⊗ root_quat)(6), root_lin_vel in heading frame(3),
      root_ang_vel_b(3), joint_pos(NJ), joint_vel(NJ)]
 
-Network output ``delta`` (12 + 2 NJ) and the integration step (dt = 0.02 s):
+Network output ``delta`` and the integration step (dt = 0.02 s), ``delta = "accel"`` (official
+SuperMimic, 6 + NJ outputs):
     dv_h(3), dw_b(3), dqd(NJ)            velocity increments, heading / body frame
-    dp_h(3), dth_b(3), dq(NJ)            position corrections on top of explicit integration
     v'  = v + R_h dv_h               w' = w + dw_b          qd' = qd + dqd
+    p'  = p + dt (v + c R_h dv_h)    q' = q ⊗ exp(dt (w + c dw_b))    qj' = qj + dt (qd + c dqd)
+    c = (n + 1) / (2 n) for n physics substeps per control step (0.625 for 4): the substeps' mean
+    velocity under a constant acceleration, so every pose is the exact integral of its velocities.
+``delta = "legacy"`` (12 + 2 NJ outputs) adds free position corrections dp_h(3), dth_b(3), dq(NJ):
     p'  = p + dt v' + R_h dp_h       q' = q ⊗ exp(dt w' + dth_b)    qj' = qj + dt qd' + dq
 With zero output the model extrapolates at constant velocity (a physical prior); the
 last layer of the dynamics MLP is zero-initialised so training starts from it.
 
-Loss / error normalisation (D3): per-quantity nominal scales sigma applied to the
-(12 + 2 NJ)-d error vector [dp(3), rotvec(3), dv(3), dw(3), dq(NJ), dqd(NJ)].
+Loss: ``loss = "official"``: Bryson's rule, squared errors of root position, root rotation (rotation
+vector), joint pos and joint vel divided by ``loss_sigma``^2 (1 cm, 0.02 rad, 0.1 rad, 3.14 rad/s; no root
+velocity terms, the velocities are scored through the poses they integrate to), averaged over the
+12 + 2 NJ channels of the official code (rotation as 9 matrix entries, whose sum equals theta^2).
+``loss = "legacy"``: per-quantity nominal scales err_scale applied to the (12 + 2 NJ)-d error vector
+[dp(3), rotvec(3), dv(3), dw(3), dq(NJ), dqd(NJ)], summed. The reported prediction error ("nse") is
+always the legacy normalised error, averaged over dims, so runs stay comparable.
 """
 
 from __future__ import annotations
@@ -50,6 +59,11 @@ class StateSpecCfg:
     # Input feature scales for [root_z, rot6d, lin_vel_h, ang_vel_b, joint_pos, joint_vel] (divide by these).
     in_scale: tuple[float, ...] = (1.0, 1.0, 1.0, 2.0, 1.0, 5.0)
     explicit_integration: bool = True
+    delta: str = "accel"  # "accel" | "legacy" (see module docstring)
+    substeps: int = 4  # physics substeps per control step (decimation)
+    loss: str = "official"  # "official" | "legacy"
+    # Bryson's-rule nominal errors of the official loss: root pos m, root rotation rad, joint pos rad, joint vel rad/s.
+    loss_sigma: tuple[float, ...] = (0.01, 0.02, 0.1, 3.14)
     # xi normalisation: (offset, scale) for [friction, encoder bias, com offset].
     xi_offset: tuple[float, ...] = (0.75, 0.0, 0.0)
     xi_scale: tuple[float, ...] = (0.45, 0.01, 0.05)
@@ -72,7 +86,10 @@ class StateSpec:
         self.dt = cfg.dt
         nj = self.nj = num_joints
         self.state_dim = self.feat_dim = 13 + 2 * nj
-        self.delta_dim = 12 + 2 * nj
+        assert cfg.delta in ("accel", "legacy") and cfg.loss in ("official", "legacy"), (cfg.delta, cfg.loss)
+        self.accel = cfg.delta == "accel"
+        self.delta_dim = 6 + nj if self.accel else 12 + 2 * nj
+        self.substep_coeff = (cfg.substeps + 1) / (2 * cfg.substeps) if self.accel else 1.0
         nb = cfg.xi_hw_bodies
         self.xi_base_dim = xi_dim(nj, nb, hardware=nb > 0)
         self.height_scan = cfg.height_scan
@@ -86,7 +103,8 @@ class StateSpec:
             self.ctx_dim = self.xi_base_dim
         rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])  # noqa: E731
         self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, nj, nj)).to(device=device, dtype=dtype)
-        self.out_scale = rep(cfg.out_scale, (3, 3, nj, 3, 3, nj)).to(device=device, dtype=dtype)
+        self.out_scale = rep(cfg.out_scale, (3, 3, nj, 3, 3, nj))[: self.delta_dim].to(device=device, dtype=dtype)
+        self.loss_scale = rep(cfg.loss_sigma, (3, 3, nj, nj)).to(device=device, dtype=dtype)
         self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, nj, nj)).to(device=device, dtype=dtype)
         xi_offset, xi_scale, xi_sizes = list(cfg.xi_offset), list(cfg.xi_scale), [1, nj, 3]
         if nb > 0:
@@ -123,17 +141,24 @@ class StateSpec:
     # ------------------------------------------------------------------ integration
 
     def integrate(self, s: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
-        """Apply the (unscaled) network output ``delta`` (…, 12 + 2 NJ) to state ``s`` (…, 13 + 2 NJ)."""
+        """Apply the (unscaled) network output ``delta`` (…, delta_dim) to state ``s`` (…, 13 + 2 NJ)."""
         d = delta * self.out_scale
         nj = self.nj
         dv_h, dw_b, dqd = d[..., 0:3], d[..., 3:6], d[..., 6 : 6 + nj]
-        dp_h, dth_b, dq = d[..., 6 + nj : 9 + nj], d[..., 9 + nj : 12 + nj], d[..., 12 + nj : 12 + 2 * nj]
         p, q, qj, v, w, qd = self.split(s)
         q = quat_normalize(q)
         hq = heading_quat(q)
-        v_new = v + quat_apply(hq, dv_h)
+        dv = quat_apply(hq, dv_h)
+        v_new = v + dv
         w_new = w + dw_b
         qd_new = qd + dqd
+        if self.accel:
+            c, dt = self.substep_coeff, self.dt
+            p_new = p + dt * (v + c * dv)
+            q_new = quat_normalize(quat_mul(q, quat_from_rotvec(dt * (w + c * dw_b))))
+            qj_new = qj + dt * (qd + c * dqd)
+            return torch.cat([p_new, q_new, qj_new, v_new, w_new, qd_new], dim=-1)
+        dp_h, dth_b, dq = d[..., 6 + nj : 9 + nj], d[..., 9 + nj : 12 + nj], d[..., 12 + nj : 12 + 2 * nj]
         dt = self.dt if self.cfg.explicit_integration else 0.0
         p_new = p + dt * v_new + quat_apply(hq, dp_h)
         q_new = quat_normalize(quat_mul(q, quat_from_rotvec(dt * w_new + dth_b)))
@@ -151,6 +176,17 @@ class StateSpec:
         rot_err = rotvec_from_quat(quat_mul(quat_apply_inverse_quat(q2), q1))
         err = torch.cat([p1 - p2, rot_err, v1 - v2, w1 - w2, qj1 - qj2, qd1 - qd2], dim=-1)
         return err / self.err_scale
+
+    def loss_per_sample(self, s_pred: torch.Tensor, s_true: torch.Tensor) -> torch.Tensor:
+        """(…,) state loss of one predicted step (see the module docstring)."""
+        if self.cfg.loss == "legacy":
+            e = self.error_vector(s_pred, s_true)
+            return (e * e).sum(-1)
+        p1, q1, qj1, _, _, qd1 = self.split(s_pred)
+        p2, q2, qj2, _, _, qd2 = self.split(s_true)
+        rot_err = rotvec_from_quat(quat_mul(quat_apply_inverse_quat(quat_normalize(q2)), quat_normalize(q1)))
+        e = torch.cat([p1 - p2, rot_err, qj1 - qj2, qd1 - qd2], dim=-1) / self.loss_scale
+        return (e * e).sum(-1) / (12 + 2 * self.nj)
 
     def normalized_sq_error(self, s_pred: torch.Tensor, s_true: torch.Tensor) -> torch.Tensor:
         """Mean over dims of the squared normalised error (the reported 'prediction error')."""

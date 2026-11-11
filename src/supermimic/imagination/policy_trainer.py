@@ -12,6 +12,7 @@ from supermimic.imagination.objective import gae_targets, policy_objective
 from supermimic.imagination.rollout import ImagRollout, imagine, imagine_velocity
 from supermimic.policy.nets import Critic, Policy, VelocityCritic
 from supermimic.training.distributed import allreduce_grads
+from supermimic.training.optim import Optimizers
 from supermimic.world_model.world_model import WorldModel
 
 
@@ -36,6 +37,12 @@ class PolicyTrainerCfg:
     compile: str | None = "default"
     anchor_obs: bool = False  # None | "default" | "reduce-overhead" | "max-autotune-no-cudagraphs"
     policy_scan: bool = False  # teacher: terrain scan at the end of the goal (set from env.policy_scan)
+    goal_stride: int = 1  # set from env.goal_stride
+    goal_root_ori: bool = False  # set from env.goal_root_ori
+    muon: bool = True  # official SuperMimic: Muon on the hidden Linear weights of policy and critic, Adam on the rest
+    # Official: clamp the critic's bootstrap value and its GAE targets to the largest possible return,
+    # max_step_reward / (1 - gamma).
+    value_clamp: bool = True
 
 
 class VelocityImagination:
@@ -49,8 +56,9 @@ class PolicyTrainer:
     def __init__(self, wm: WorldModel, policy: Policy, critic: Critic, lib: MotionLibrary, cfg: PolicyTrainerCfg, velocity: VelocityImagination | None = None):
         self.wm, self.policy, self.critic, self.lib, self.cfg = wm, policy, critic, lib, cfg
         self.velocity = velocity
-        self.opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, betas=cfg.betas)
-        self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
+        self.opt = Optimizers([policy], cfg.lr, betas=cfg.betas, muon=cfg.muon)
+        self.critic_opt = Optimizers([critic], cfg.critic_lr, muon=cfg.muon)
+        self.v_max = wm.heads.reward_cfg.max_step_reward / (1.0 - cfg.gamma) if cfg.value_clamp else float("inf")
         from supermimic.imagination.compiled import ImagStep, VelStep
 
         self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile)
@@ -61,14 +69,13 @@ class PolicyTrainer:
             assert wm.terrains is not None, "policy_scan needs the world model's terrains"
             self.policy_scan = HeightScan(wm.terrains, POLICY_GRID).to(lib.default_joint_pos.device)
         if velocity is not None:
-            self.vel_critic_opt = torch.optim.Adam(velocity.critic.parameters(), lr=cfg.critic_lr)
+            self.vel_critic_opt = Optimizers([velocity.critic], cfg.critic_lr, muon=cfg.muon)
             self.vel_step_fn = VelStep(wm, lib.default_joint_pos, velocity.cfg, compile_mode=cfg.compile)
 
     def set_lr(self, lr: float) -> None:
         opts = [self.opt, self.critic_opt] + ([self.vel_critic_opt] if self.velocity is not None else [])
         for o in opts:
-            for g in o.param_groups:
-                g["lr"] = lr
+            o.set_lr(lr)
 
     def _fit_critic(self, critic, opt, inputs: list[torch.Tensor], rewards: torch.Tensor, dhat_next: torch.Tensor) -> dict[str, float]:
         """Fit critic(*inputs) to the GAE targets of one rollout. inputs: (H+1, n, d) each, detached."""
@@ -76,7 +83,7 @@ class PolicyTrainer:
         H1, n = rewards.shape[0] + 1, rewards.shape[1]
         with torch.no_grad():
             values = critic(*[x.reshape(H1 * n, -1) for x in inputs]).reshape(H1, n)
-            targets = gae_targets(rewards, dhat_next, values, cfg.gamma, cfg.gae_lambda)
+            targets = gae_targets(rewards, dhat_next, values, cfg.gamma, cfg.gae_lambda).clamp(max=self.v_max)
             X = [x[:-1].reshape((H1 - 1) * n, -1) for x in inputs]
             Y = targets.reshape(-1)
         N = Y.shape[0]
@@ -90,7 +97,7 @@ class PolicyTrainer:
                 opt.zero_grad(set_to_none=True)
                 closs.backward()
                 allreduce_grads(critic)
-                torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.critic_grad_clip)
+                torch.nn.utils.clip_grad_norm_(opt.params, cfg.critic_grad_clip)
                 opt.step()
                 last = closs.detach()
         return {"critic_loss": float(last), "critic_value_mean": float(values.mean()), "critic_target_mean": float(targets.mean())}
@@ -129,22 +136,23 @@ class PolicyTrainer:
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
         ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs,
-                     policy_scan=self.policy_scan)
+                     policy_scan=self.policy_scan, goal_stride=cfg.goal_stride, goal_root_ori=cfg.goal_root_ori)
         feat, goals, e_root = self._critic_inputs(ro)
         ctx = self.wm.context(ro.states, start.xi)  # (H+1, n, ctx): normalised xi (+ height scan)
         if cfg.use_critic:
-            v_H = self.critic(feat[-1], goals[-1], ctx[-1], e_root[-1])
+            v_H = self.critic(feat[-1], goals[-1], ctx[-1], e_root[-1]).clamp(max=self.v_max)
         else:
             v_H = None
         J = policy_objective(ro, v_H, cfg.gamma)
         loss = -J / cfg.horizon
         if n_vel > 0:
             vstart, cmd0, from_ref = self._velocity_starts(buffer, n_vel)
-            vro = imagine_velocity(self.wm, self.policy, self.lib, vstart, cmd0, from_ref, v.ref_cmd, cfg.horizon, self.vel_step_fn, cfg.future_frames, obs_noise=cfg.obs_noise)
+            vro = imagine_velocity(self.wm, self.policy, self.lib, vstart, cmd0, from_ref, v.ref_cmd, cfg.horizon, self.vel_step_fn, cfg.future_frames, obs_noise=cfg.obs_noise,
+                                   goal_stride=cfg.goal_stride, goal_root_ori=cfg.goal_root_ori)
             v.critic.requires_grad_(False)
             vfeat = self.wm.spec.canonical(vro.states.reshape(-1, vro.states.shape[-1])).reshape(*vro.states.shape[:2], -1)
             vctx = self.wm.context(vro.states, vstart.xi)
-            vv_H = v.critic(vfeat[-1], vro.cmds[-1], vctx[-1]) if cfg.use_critic else None
+            vv_H = v.critic(vfeat[-1], vro.cmds[-1], vctx[-1]).clamp(max=self.v_max) if cfg.use_critic else None
             J_vel = policy_objective(vro, vv_H, cfg.gamma)
             loss = loss - J_vel / cfg.horizon + v.cfg.align_weight * vro.align_loss
         self.opt.zero_grad(set_to_none=True)

@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from supermimic.kinematics.rotations import projected_gravity, quat_apply_inverse, yaw_quat
+from supermimic.kinematics.rotations import projected_gravity, quat_apply_inverse, quat_inv, quat_mul, rot6d_from_quat, yaw_quat
 from supermimic.robots import RobotSpec
 
 
@@ -234,15 +234,27 @@ class MotionLibrary:
     def last_frame_of(self, frame: torch.Tensor) -> torch.Tensor:
         return self.clip_last[self.frame_clip[frame]]
 
-    def goal_window(self, frame: torch.Tensor, k: int) -> torch.Tensor:
-        """(N, k*(2NJ+10)) goal features of frames frame..frame+k-1, clamped at the clip end."""
+    def goal_frames(self, frame: torch.Tensor, k: int, stride: int = 1) -> torch.Tensor:
+        """(N, k) goal frames frame, frame+stride, ..., frame+(k-1)*stride, clamped at the clip end."""
         last = self.last_frame_of(frame)
-        offs = torch.arange(k, device=self.device)
-        idx = torch.minimum(frame[:, None] + offs[None, :], last[:, None])  # (N,k)
+        offs = torch.arange(k, device=self.device) * stride
+        return torch.minimum(frame[:, None] + offs[None, :], last[:, None])
+
+    def goal_window(self, frame: torch.Tensor, k: int, stride: int = 1) -> torch.Tensor:
+        """(N, k*(2NJ+10)) goal features of the k goal frames (``goal_frames``)."""
+        idx = self.goal_frames(frame, k, stride)
         if not self.compact:
             return self.goal_feat[idx].reshape(frame.shape[0], k * self.goal_feat_dim)
         feat = goal_features(self.ref(idx.reshape(-1)), self.default_joint_pos)
         return feat.reshape(frame.shape[0], k * self.goal_feat_dim)
+
+    def goal_root_ori(self, frame: torch.Tensor, k: int, stride: int, root_quat: torch.Tensor) -> torch.Tensor:
+        """(N, 6k) rot6d of each goal frame's reference root orientation in the robot's root frame
+        (root_quat (N, 4), wxyz). Differentiable in root_quat."""
+        idx = self.goal_frames(frame, k, stride)
+        q_ref = self._ref[idx, 3:7].to(root_quat.dtype)  # (N, k, 4)
+        q_rel = quat_mul(quat_inv(root_quat)[:, None, :].expand_as(q_ref), q_ref)
+        return rot6d_from_quat(q_rel).reshape(frame.shape[0], 6 * k)
 
     def ref_qpos_qvel(self, frame: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """MuJoCo-layout reference state: qpos (N,7+NJ) and qvel (N,6+NJ; root ang vel in body frame)."""

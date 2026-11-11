@@ -362,6 +362,38 @@ imagination; a depth student (mjlab_dash `depth.py` pipeline) will be distilled 
   systemd-oomd killed the GNOME terminal running Claude (and with it the user's desktop session). Run memory
   heavy tests under `systemd-run --user --scope -p MemoryMax=32G -p MemorySwapMax=0`.
 
+## Alignment with the official SuperMimic code (2026-11-10)
+
+The authors released their code on 2026-11-10 (github.com/HybridRobotics/supermimic; its env base config is in a
+private mjlab fork, so some env details are unverifiable). Same as ours: 4096 envs, UTD 0.4, 1 WM + 1 policy
+update, 10x2048 8-step WM windows, H = 32, gamma/lambda, reward terms, network sizes, reset-sampler mix
+0.5/0.4/0.1. Adopted from it (all new defaults, each with a switch back):
+- **Goal**: `env.goal_stride` 5 (10 frames over 0.9 s instead of 0.18 s) and `env.goal_root_ori` (each goal
+  frame's reference root orientation in the robot root frame, rot6d, +6K dims after the frame features; IMU
+  attitude only). In imagination it is computed from the predicted root, so BPTT flows through it. Motion ONNX
+  export then takes a third input `root_quat` (IMU attitude, yaw aligned to the reference at time_step 0); the
+  planner `goal` interface refuses such checkpoints.
+- **World model**: `state_spec.delta="accel"` (6 + NJ outputs, velocity increments only; poses integrate
+  v + c dv, c = 5/8 for 4 substeps), `state_spec.loss="official"` (Bryson weights 1 cm, 0.02 rad, 0.1 rad,
+  3.14 rad/s on root pos / root rot / qj / qd, no root velocity terms, mean over 12 + 2 NJ channels; our old sum
+  kept the grad clip always active). The logged `nse` stays the old normalised error, so runs compare.
+  `world_model.termination="analytic"`: sigmoid((max(|dh|/0.25, |dtilt|/0.8) - 1)/0.05), no BCE.
+- **Networks**: Linear -> LayerNorm -> GELU (`act`, `layer_norm` on world model, policy, critic) and running
+  mean/std input normalisers (`input_norm`: WM state features + action, policy obs history + goal), updated each
+  env step from sim-collected data only (`training/loop.py`), never in imagination.
+- **Optimizer**: `training/optim.py` `Optimizers`: torch.optim.Muon (weight decay 0.1, AdamW-matched lr) on the
+  hidden Linear weights, Adam on the rest (`wm_trainer.muon`, `policy_trainer.muon`). `schedule.lr_schedule`
+  "constant" (official code; the paper says cosine).
+- **Critic**: bootstrap value and GAE targets clamped to max_step_reward / (1 - gamma) = 10.
+- **Reset sampler memory**: `memory_mode="cumulative"` (sum over the run of hard^2, official); our old EMA
+  forgot within ~100 env steps (a likely cause of t2 losing floor sitting).
+- Kept ours: proprio actor with noise and 10-frame history (official default is the privileged noise-free
+  state), per-reset DR + hardware DR, terminal transitions in the replay, MC + horizon-normalised sampler
+  returns, the heading frame (official uses the body frame), policy loss / H.
+- Old checkpoints: `load_policy_from_checkpoint` fills missing policy fields with `LEGACY_POLICY_CFG`;
+  `eval.benchmark.goal_env_kwargs(config)` gives scripts the checkpoint's goal layout (old: stride 1, no root ori).
+- Smoke run (256 envs, 300 it, teacher flags): WM nse8 0.024 vs 0.34 with the old code, imag return 0.95 vs 0.44.
+
 ## PARC terrain data (2026-11-08, lab server)
 
 Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SIGGRAPH 2025; MIT):

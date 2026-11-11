@@ -21,7 +21,7 @@ from supermimic.robots import get_robot
 from supermimic.terrain.height_scan import POLICY_SCAN_DIM
 from supermimic.terrain.terrains import load_terrains
 from supermimic.training.distributed import allreduce_mean, broadcast_params, finalize, init_distributed, world_size
-from supermimic.training.schedule import cosine_lr
+from supermimic.training.schedule import scheduled_lr
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.wm_trainer import WorldModelTrainer
 from supermimic.world_model.world_model import WorldModel
@@ -47,9 +47,14 @@ class Trainer:
         self.robot = spec = get_robot(cfg.robot)
         cfg.policy.num_joints = spec.num_joints
         cfg.policy.terrain_dim = POLICY_SCAN_DIM if cfg.env.policy_scan else 0
-        cfg.policy.goal_dim = cfg.env.future_frames * spec.goal_feat_dim + (9 if cfg.env.anchor_obs else 0) + cfg.policy.terrain_dim
+        K = cfg.env.future_frames
+        cfg.policy.goal_frames = K
+        cfg.policy.goal_dim = K * spec.goal_feat_dim + (6 * K if cfg.env.goal_root_ori else 0) + (9 if cfg.env.anchor_obs else 0) + cfg.policy.terrain_dim
+        cfg.policy_trainer.future_frames = K
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
         cfg.policy_trainer.policy_scan = cfg.env.policy_scan
+        cfg.policy_trainer.goal_stride = cfg.env.goal_stride
+        cfg.policy_trainer.goal_root_ori = cfg.env.goal_root_ori
         # With hardware DR, its parameters (per joint and per body) enter xi (envs/sim_context.py).
         cfg.world_model.state_spec.xi_hw_bodies = spec.num_bodies if cfg.env.hardware_dr else 0
         vcfg = cfg.velocity
@@ -92,6 +97,8 @@ class Trainer:
                 robot=spec.name,
                 num_envs=cfg.env.num_envs,
                 future_frames=cfg.env.future_frames,
+                goal_stride=cfg.env.goal_stride,
+                goal_root_ori=cfg.env.goal_root_ori,
                 episode_length_s=cfg.env.episode_length_s,
                 action_noise_std=cfg.env.action_noise_std,
                 obs_noise=cfg.env.obs_noise,
@@ -310,8 +317,12 @@ class Trainer:
         while self.iteration < sch.total_iterations:
             # ---------------- (1) collect one vectorised env step
             t0 = time.perf_counter()
+            # Input normalisers (official SuperMimic): running statistics of sim-collected inputs only.
+            self.policy.update_normalization(obs["policy"] if self.vel is None else obs["policy"][~self.vel_mask],
+                                             obs["goal"] if self.vel is None else obs["goal"][~self.vel_mask])
             action = self.act(obs)
             obs, rew, term, tout, extras = env.step(action)
+            self.wm.update_normalization(self.recorder.state_io.read(), self.recorder.action_term.executed_raw)
             self.ep_reward_sum += rew
             self.ep_len += 1
             done = term | tout
@@ -335,7 +346,7 @@ class Trainer:
                 self._utd_acc += sch.updates_per_env_step
                 while self._utd_acc >= 1.0:
                     self._utd_acc -= 1.0
-                    lr = cosine_lr(self.iteration, sch.total_iterations, cfg.wm_trainer.lr, sch.lr_final_ratio, sch.lr_decay_fraction)
+                    lr = scheduled_lr(sch.lr_schedule, self.iteration, sch.total_iterations, cfg.wm_trainer.lr, sch.lr_final_ratio, sch.lr_decay_fraction)
                     self.wm_trainer.set_lr(lr)
                     self.policy_trainer.set_lr(lr * cfg.policy_trainer.lr / cfg.wm_trainer.lr)
                     t0 = time.perf_counter()

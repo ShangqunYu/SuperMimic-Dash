@@ -25,6 +25,14 @@ def obs_noise_half(nj: int) -> torch.Tensor:
 ANCHOR_NOISE_HALF = torch.tensor([0.25] * 3 + [0.05] * 6)
 
 
+def motion_goal(lib: MotionLibrary, frame: torch.Tensor, s: torch.Tensor, future_frames: int, goal_stride: int, goal_root_ori: bool) -> torch.Tensor:
+    """Goal of a proprioception-only motion policy (no anchor terms, no terrain scan) at state s."""
+    g = lib.goal_window(frame, future_frames, goal_stride)
+    if goal_root_ori:
+        g = torch.cat([g, lib.goal_root_ori(frame, future_frames, goal_stride, s[..., 3:7])], dim=-1)
+    return g
+
+
 @dataclass
 class ImagRollout:
     states: torch.Tensor  # (H+1, n, 13+2NJ)
@@ -49,8 +57,11 @@ def imagine(
     step_fn: ImagStep | None = None,
     anchor_obs: bool = False,
     policy_scan=None,
+    goal_stride: int = 1,
+    goal_root_ori: bool = False,
 ) -> ImagRollout:
-    """policy_scan: a HeightScan on POLICY_GRID for a teacher policy (terrain at the end of its goal)."""
+    """policy_scan: a HeightScan on POLICY_GRID for a teacher policy (terrain at the end of its goal).
+    goal_root_ori: the goal frames' root orientation relative to the imagined root (gradients flow through it)."""
     device = start.state.device
     n = start.state.shape[0]
     q0 = lib.default_joint_pos
@@ -67,8 +78,10 @@ def imagine(
     tile = wm.spec.tile_of(start.xi) if policy_scan is not None else None
 
     def make_goal(frame_t, ref_t, anchor_pose, s_t):
-        # Same layout as the env's goal group: future frames, anchor terms, terrain scan.
-        parts = [lib.goal_window(frame_t, future_frames)]
+        # Same layout as the env's goal group: future frames, their root orientation, anchor terms, terrain scan.
+        parts = [lib.goal_window(frame_t, future_frames, goal_stride)]
+        if goal_root_ori:
+            parts.append(lib.goal_root_ori(frame_t, future_frames, goal_stride, s_t[..., 3:7]))
         if anchor_obs:
             rel = anchor_relative_obs(anchor_pose[..., 0:3], anchor_pose[..., 3:7], ref_t.body_pos_w[..., ai, :], ref_t.body_quat_w[..., ai, :])
             if obs_noise:
@@ -167,6 +180,8 @@ def imagine_velocity(
     step_fn,
     future_frames: int = 10,
     obs_noise: bool = True,
+    goal_stride: int = 1,
+    goal_root_ori: bool = False,
 ) -> VelRollout:
     """Velocity-interface rollout (Appendix B/G). The decoder runs with frozen weights, so the return
     gradient reaches only the velocity encoder. Samples with ``from_ref`` read their command from the
@@ -197,7 +212,7 @@ def imagine_velocity(
         z = policy.encoders["velocity"](cmd, obs_flat)
         if ref_ids.numel() > 0:
             with torch.no_grad():
-                z_ref = policy.encoders["motion"](lib.goal_window(frames_all[t, ref_ids], future_frames))
+                z_ref = policy.latent(None, motion_goal(lib, frames_all[t, ref_ids], s[ref_ids], future_frames, goal_stride, goal_root_ori))
             align = align + ((z[ref_ids] - z_ref) ** 2).mean()
         a = policy.decode_frozen(z, obs_flat)
         s_next, r, term_vec, logits, obs_clean = step_fn(s, a, a_prev, start.xi, cmd)
