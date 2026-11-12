@@ -469,6 +469,7 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   | dash_teacher_v4 10k (18k + 10k on v4) | 1,088, 0.480 | 27, 0.843 | 33, 0.877 | 65, 0.796 | 10, 0.703 |
   | dash_teacher_v4 30k | 908, 0.511 | 8, 0.879 | 13, 0.893 | 8, 0.839 | 3, 0.745 |
   | dash_teacher_v4 60k | 781, 0.523 | 6, 0.890 | 5, 0.897 | 2, 0.866 | 7, 0.779 |
+  | dash_teacher_v4 88k | 723, 0.543 | 20, 0.891 | 9, 0.908 | 8, 0.872 | 0, 0.788 |
 
   US stair failures by riser (12 / 15 / 17.8 / 20 cm), 18k -> v4 10k: up 19/36 -> 9, 22/36 -> 18, 29/31 -> 13,
   11/11 -> 6; down 20/50 -> 0, 21/46 -> 1, 26/48 -> 8, 38/48 -> 10. Box jumps by height (25 / 28 / 31 cm):
@@ -478,6 +479,10 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   At v4 30k: stairs down 0 failures at every riser; up 0/36, 1/36, 3/31, 4/11 (12 / 15 / 17.8 / 20 cm). Box
   jumps 0/120, 1/108, 2/108. Training return 0.600 at 30.8k (2.8 it/s).
   At 60k: stairs fail only 2/11 up at 20 cm (0 at 17.8 cm and below); box jumps 0/120, 2/108, 5/108.
+  At 88k: PARC and mean scores still rise (train_ret per 10k: 0.551, 0.577, 0.586, 0.590, 0.593, 0.596, 0.596,
+  0.600, 0.606), but failures on the near-solved sets churn between checkpoints (constant LR): vs 60k, 19 new
+  come_up_50cm_box failures, 7 new stairs-down, 7 sitting clips; 0 box-jump failures. Pick the final checkpoint by
+  benchmark, not by recency.
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
