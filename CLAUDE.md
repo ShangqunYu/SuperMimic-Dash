@@ -505,6 +505,25 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   | **v4b 150k (final)** | **443, 0.592** | 1, 0.918 | 0, 0.928 | 0, 0.930 | 0, 0.840 |
 
   **Teacher: `logs/dash_teacher_v4b/ckpt_0150000.pt`.** All US stairs and box jumps pass; PARC 9.5% fail.
+- **The benchmark misses horizontal drift (2026-11-12).** "Failed" is root height error > 0.25 m or tilt > 0.8, so a
+  robot that skips a move but stays upright passes (video: `logs/teacher_videos/v4b_150k/successes/03_*`, a vault
+  where the robot never vaults and ends 2.9 m behind). Max horizontal root offset of every 150k pass (scratchpad
+  `drift_check.py`, standalone rollouts with terminations off; `logs/ab_eval/teacher_v4b_150k_drift_*.json`):
+
+  | | passes | max offset > 0.5 m | > 1 m | median max offset |
+  |---|---|---|---|---|
+  | v3 terrain | 2,401 | 0 | 0 | 0.08 m |
+  | US stairs | 306 | 0 | 0 | 0.13 m |
+  | US box jumps | 336 | 2 | 0 | 0.11 m |
+  | PARC | 4,243 | 2,207 | 1,170 | 0.52 m |
+
+  PARC by kind (passes with > 1 m): vaulting 182/211, jumping 22/24 (median 5.4 m: the jumps are skipped),
+  mixed terrain 433/1,029, boxes 208/612, running 256/1,616, platform 68/556, stairs 1/195. The offset grows to
+  the clip end (final/max p50 1.0): the robot falls behind and does not catch up. Counting > 1 m as a failure, PARC
+  succeeds 66% (not 90.5%); our own mocap sets are unaffected. Training terminates on the same height/tilt rule, so
+  skipping a hard move is never punished by termination, only by lower reward.
+  Standalone re-runs of the 444 benchmark failures: 411 fail again (33 borderline); 29 fail in the first 15% of the
+  clip (reference start likely infeasible).
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
