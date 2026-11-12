@@ -58,15 +58,19 @@ def framing(m, d, Q, aspect_wh):
     return np.array([look[0], look[1], c_z]), head + 90.0, dist
 
 
-def section_cut(boxes, Q, m, d, margin=0.3):
+def section_cut(boxes, Q, m, d, margin=0.3, strip=0.2):
     """Drop terrain boxes that lie wholly between the camera and the path, and trim the ones that reach into
     that space, so foreground terrain never hides the robot (a cutaway). The camera is on the robot's right
-    of the travel direction; the cut is `margin` beyond the feet."""
+    of the travel direction; the cut is `margin` beyond the feet.
+
+    Boxes are axis-aligned but the cut line is not when the path runs diagonally: a cut box is split into
+    `strip`-wide strips across the trim axis, and each strip keeps everything on the path side of the line
+    over its whole width (a little foreground may remain; terrain on the path side is never removed)."""
     p = Q[:, :2]; u = p[-1] - p[0]; u /= np.linalg.norm(u); lat = np.array([-u[1], u[0]])
     feet = []
     for q in Q[::4]:
         d.qpos[:] = q; mujoco.mj_kinematics(m, d)
-        feet += [d.xpos[m.body(f"{s}_foot").id][:2] for s in "lr"]
+        feet += [d.xpos[m.body(f"{s}_foot").id][:2].copy() for s in "lr"]  # copies: d.xpos is a live view
     cut = float(np.min(np.array(feet) @ lat)) - margin
     out = []
     for b in boxes:
@@ -74,17 +78,27 @@ def section_cut(boxes, Q, m, d, margin=0.3):
         corners = np.array([[cx + sx * hx, cy + sy * hy] for sx in (-1, 1) for sy in (-1, 1)]) @ lat
         if corners.max() <= cut:
             continue
-        if corners.min() < cut:  # trim along the box axis closest to the lateral direction
-            ax = 0 if abs(lat[0]) >= abs(lat[1]) else 1
-            sgn = np.sign(lat[ax])
-            lo, hi = (cx - hx, cx + hx) if ax == 0 else (cy - hy, cy + hy)
-            c0 = (cut - (np.array([cx, cy]) @ lat - lat[ax] * (cx if ax == 0 else cy))) / lat[ax]  # axis coord at the cut
-            lo, hi = (max(lo, c0), hi) if sgn > 0 else (lo, min(hi, c0))
-            if hi - lo < 1e-3:
+        if corners.min() >= cut:
+            out.append(b)
+            continue
+        # trim along the box axis closest to the lateral direction; kept: lat . (x, y) >= cut
+        ax = 0 if abs(lat[0]) >= abs(lat[1]) else 1
+        ot = 1 - ax
+        ctr, half = np.array([cx, cy]), np.array([hx, hy])
+        lo, hi = ctr[ax] - half[ax], ctr[ax] + half[ax]
+        o_lo, o_hi = ctr[ot] - half[ot], ctr[ot] + half[ot]
+        n = max(1, int(np.ceil((o_hi - o_lo) / strip)))
+        for k in range(n):
+            s0, s1 = o_lo + (o_hi - o_lo) * k / n, o_lo + (o_hi - o_lo) * (k + 1) / n
+            c_ends = [(cut - lat[ot] * o) / lat[ax] for o in (s0, s1)]  # trim-axis coordinate of the cut line
+            a0, a1 = (max(lo, min(c_ends)), hi) if lat[ax] > 0 else (lo, min(hi, max(c_ends)))
+            if a1 - a0 < 1e-3:
                 continue
-            c, h = (lo + hi) / 2, (hi - lo) / 2
-            b = (c, cy, cz, h, hy, hz) if ax == 0 else (cx, c, cz, hx, h, hz)
-        out.append(b)
+            nb = [0.0] * 6
+            nb[2], nb[5] = cz, hz
+            nb[ax], nb[3 + ax] = (a0 + a1) / 2, (a1 - a0) / 2
+            nb[ot], nb[3 + ot] = (s0 + s1) / 2, (s1 - s0) / 2
+            out.append(tuple(nb))
     return out
 
 

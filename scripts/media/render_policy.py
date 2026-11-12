@@ -108,12 +108,21 @@ def render(m, Q, R, w, h, lines, dist=3.2, elev=-12.0, fail_at=None):
     font2 = ImageFont.truetype("DejaVuSans.ttf", 24)
     key = m.light("key").id
     kd = m.light_dir[key] / np.linalg.norm(m.light_dir[key])
+    # terrain boxes left after the cutaway can still stand between the camera and the robot (tall walls when the
+    # robot drops behind them): per frame, those wholly nearer the camera than the robot are drawn see-through
+    f = np.array([np.cos(np.radians(az)), np.sin(np.radians(az))])  # horizontal view direction
+    ter = {g: float(max((m.geom_pos[g, :2] + np.array([sx, sy]) * m.geom_size[g, :2]) @ f for sx in (-1, 1) for sy in (-1, 1)))
+           for g in range(m.ngeom) if m.geom(g).name.startswith("terrain_")}
     for t in range(len(Q)):
         m.light_pos[key] = look[t] - 20 * kd
         d.qpos[:] = Q[t]
         mujoco.mj_forward(m, d)
         cam.lookat[:] = look[t]
         r.update_scene(d, cam, opt)
+        depth = float(Q[t, :2] @ f) - 0.35
+        for g in r.scene.geoms[: r.scene.ngeom]:
+            if g.objtype == mujoco.mjtObj.mjOBJ_GEOM and ter.get(g.objid, np.inf) < depth:
+                g.rgba[3] = 0.25
         dg.qpos[:] = R[min(t, len(R) - 1)]
         mujoco.mj_forward(m, dg)
         n0 = r.scene.ngeom
