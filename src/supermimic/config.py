@@ -55,6 +55,7 @@ class ScheduleCfg:
     lr_schedule: str = "constant"  # "constant" (official code) | "cosine" (paper)
     lr_final_ratio: float = 0.03
     lr_decay_fraction: float = 250_000 / 320_000
+    lr_decay_start: int = 0  # cosine: base rate until this iteration, decay over the rest (resumed runs)
     log_interval: int = 50  # iterations
     checkpoint_interval: int = 4000  # iterations
     max_hours: float | None = None
