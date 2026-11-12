@@ -492,6 +492,19 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   `--resume .../dash_teacher_v4/ckpt_0100000.pt --schedule.total-iterations 150000 --schedule.lr-schedule cosine
   --schedule.lr-decay-start 100000 --schedule.lr-decay-fraction 1.0` (2e-4 -> 6e-6 over 50k; same other flags).
   Log `logs/dash_teacher_v4b.out`; benchmarks every 10k in `logs/ab_eval/teacher_v4b_*k.json`.
+  Finished 2026-11-12 ~02:00 (4.8 h). The decay helped far more than more constant LR (PARC failures per 10k:
+  constant -13, decay -35 to -89):
+
+  | | PARC (4,681) | v3 terrain (2,402) | flat sample (2,000) | US stairs (306) | US box jumps (336) |
+  |---|---|---|---|---|---|
+  | v4 100k (start) | 710, 0.541 | 8, 0.901 | 4, 0.909 | 1, 0.895 | 0, 0.796 |
+  | v4b 110k | 675, 0.540 | 10, 0.895 | 2, 0.909 | 1, 0.883 | 0, 0.781 |
+  | v4b 120k | 612, 0.559 | 13, 0.896 | 1, 0.912 | 0, 0.902 | 0, 0.812 |
+  | v4b 130k | 551, 0.563 | 9, 0.908 | 1, 0.917 | 1, 0.919 | 0, 0.811 |
+  | v4b 140k | 462, 0.587 | 0, 0.917 | 0, 0.925 | 0, 0.930 | 0, 0.834 |
+  | **v4b 150k (final)** | **443, 0.592** | 1, 0.918 | 0, 0.928 | 0, 0.930 | 0, 0.840 |
+
+  **Teacher: `logs/dash_teacher_v4b/ckpt_0150000.pt`.** All US stairs and box jumps pass; PARC 9.5% fail.
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
