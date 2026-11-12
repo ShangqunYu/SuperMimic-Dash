@@ -524,6 +524,10 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   skipping a hard move is never punished by termination, only by lower reward.
   Standalone re-runs of the 444 benchmark failures: 411 fail again (33 borderline); 29 fail in the first 15% of the
   clip (reference start likely infeasible).
+- **Render cutaway bug (fixed 2026-11-12, physics unaffected):** `render_strobe.section_cut` kept views of
+  `d.xpos` (every stored foot position = the last frame's) and trimmed diagonal cuts at the box centre, so terrain
+  under the robot vanished in 5 of the first 12 v4b_150k videos (robot "walking on air"). The 12 retarget
+  strobe/grid clips were unaffected (checked). MuJoCo `d.xpos[i]` is a live view: copy before storing.
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
