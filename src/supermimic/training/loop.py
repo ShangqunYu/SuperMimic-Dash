@@ -353,6 +353,7 @@ class Trainer:
         agg_n = 0
         finished_returns: list[float] = []
         finished_lens: list[float] = []
+        ends: dict[str, int] = {}  # episode ends per termination term (this rank, this log interval)
         last_log = time.time()
 
         while self.iteration < sch.total_iterations:
@@ -363,6 +364,9 @@ class Trainer:
                                              obs["goal"] if self.vel is None else obs["goal"][~self.vel_mask])
             action = self.act(obs)
             obs, rew, term, tout, extras = env.step(action)
+            for k, v in extras.get("log", {}).items():
+                if k.startswith("Episode_Termination/"):
+                    ends[k.split("/", 1)[1]] = ends.get(k.split("/", 1)[1], 0) + int(v)
             self.wm.update_normalization(self.recorder.state_io.read(), self.recorder.action_term.executed_raw)
             self.ep_reward_sum += rew
             self.ep_len += 1
@@ -432,6 +436,8 @@ class Trainer:
                     tr = sum(finished_returns) / len(finished_returns)
                     self.writer.add_scalar("train/episode_norm_return", tr, it)
                     self.writer.add_scalar("train/episode_len", sum(finished_lens) / max(len(finished_lens), 1), it)
+                    for k, v in ends.items():
+                        self.writer.add_scalar(f"train/end_{k}", v / max(len(finished_lens), 1), it)
                 else:
                     tr = float("nan")
                 with torch.no_grad():
@@ -472,6 +478,8 @@ class Trainer:
                         f"imag_ret {agg.get('policy/imag_return_undisc', float('nan'))/max(agg_n,1):.3f} surv {agg.get('policy/imag_survival_H', float('nan'))/max(agg_n,1):.3f} | "
                         f"t sim/wm/pi {timers['sim']:.1f}/{timers['wm']:.1f}/{timers['policy']:.1f}s"
                     )
+                    if self.vel is None and finished_lens:
+                        msg += " | ends " + " ".join(f"{k} {v / len(finished_lens):.3f}" for k, v in ends.items() if v and k not in ("time_out", "clip_end"))
                     if self.vel is not None:
                         vs = self._vel_stats
                         msg += (
@@ -484,6 +492,7 @@ class Trainer:
                     print(msg, flush=True)
                 agg, agg_n = {}, 0
                 finished_returns, finished_lens = [], []
+                ends = {}
                 timers = {k: 0.0 for k in timers}
                 if self.vel is not None:
                     vel_returns = []
