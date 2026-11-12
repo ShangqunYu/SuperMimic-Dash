@@ -470,6 +470,7 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   | dash_teacher_v4 30k | 908, 0.511 | 8, 0.879 | 13, 0.893 | 8, 0.839 | 3, 0.745 |
   | dash_teacher_v4 60k | 781, 0.523 | 6, 0.890 | 5, 0.897 | 2, 0.866 | 7, 0.779 |
   | dash_teacher_v4 88k | 723, 0.543 | 20, 0.891 | 9, 0.908 | 8, 0.872 | 0, 0.788 |
+  | **dash_teacher_v4 100k (final)** | 710, 0.541 | 8, 0.901 | 4, 0.909 | 1, 0.895 | 0, 0.796 |
 
   US stair failures by riser (12 / 15 / 17.8 / 20 cm), 18k -> v4 10k: up 19/36 -> 9, 22/36 -> 18, 29/31 -> 13,
   11/11 -> 6; down 20/50 -> 0, 21/46 -> 1, 26/48 -> 8, 38/48 -> 10. Box jumps by height (25 / 28 / 31 cm):
@@ -483,6 +484,9 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   0.600, 0.606), but failures on the near-solved sets churn between checkpoints (constant LR): vs 60k, 19 new
   come_up_50cm_box failures, 7 new stairs-down, 7 sitting clips; 0 box-jump failures. Pick the final checkpoint by
   benchmark, not by recency.
+  The run finished at 100k (2026-11-11 ~20:50, 9.8 h). 100k is the best or within 0.002 of the best checkpoint in
+  every group: stairs fail 1/306 (one 17.8 cm climb), box jumps 0/336. Use `logs/dash_teacher_v4/ckpt_0100000.pt`
+  as the teacher. Rollout videos (60k): `logs/teacher_videos/v4_60k/` via `scripts/media/render_policy.py`.
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
