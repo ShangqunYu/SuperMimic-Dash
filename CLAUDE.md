@@ -487,6 +487,11 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   The run finished at 100k (2026-11-11 ~20:50, 9.8 h). 100k is the best or within 0.002 of the best checkpoint in
   every group: stairs fail 1/306 (one 17.8 cm climb), box jumps 0/336. Use `logs/dash_teacher_v4/ckpt_0100000.pt`
   as the teacher. Rollout videos (60k): `logs/teacher_videos/v4_60k/` via `scripts/media/render_policy.py`.
+- **Run `dash_teacher_v4b`** (GPU 0, started 2026-11-11 ~21:10): train_ret was flat over v4's last 20k
+  (0.606 / 0.606 / 0.605 per 10k), so resume v4 100k with a cosine LR decay instead of more constant LR:
+  `--resume .../dash_teacher_v4/ckpt_0100000.pt --schedule.total-iterations 150000 --schedule.lr-schedule cosine
+  --schedule.lr-decay-start 100000 --schedule.lr-decay-fraction 1.0` (2e-4 -> 6e-6 over 50k; same other flags).
+  Log `logs/dash_teacher_v4b.out`; benchmarks every 10k in `logs/ab_eval/teacher_v4b_*k.json`.
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
