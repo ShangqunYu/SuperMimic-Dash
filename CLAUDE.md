@@ -528,6 +528,28 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   `d.xpos` (every stored foot position = the last frame's) and trimmed diagonal cuts at the box centre, so terrain
   under the robot vanished in 5 of the first 12 v4b_150k videos (robot "walking on air"). The 12 retarget
   strobe/grid clips were unaffected (checked). MuJoCo `d.xpos[i]` is a live view: copy before storing.
+- **Drift-aware benchmark and termination (2026-11-12).** `eval/benchmark.py` records each clip's max root horizontal
+  distance from the reference; `summarize` adds `failed_or_drift` (> 1 m). `scripts/eval_groups.py` is the grouped
+  benchmark (was scratchpad `ab_bench.py`; same groups, plus PARC by type, stairs by riser, jumps by height,
+  per-clip results). `--env.root-xy-threshold M` ends tracking episodes at M m horizontal distance in the sim
+  (`bad_root_xy`) and in imagination (`world_model.xy_threshold` follows it: a third analytic soft threshold);
+  default off. Console `ends ...` / TensorBoard `train/end_*`: share of episode ends per termination term.
+  150k teacher, v4 library (`logs/ab_eval/teacher_v4b_150k_groups.json`; failed / failed or drift > 1 m / clips):
+  PARC 428 / 1,638 / 4,681 (vaulting 18/200/228, jumping 2/24/26, teaser 197/638/1,234, boxes 133/346/748, running
+  23/300/1,643, platform 52/126/604, stairs 3/4/198); v3 terrain 1/1; flat 0/5 of 2,000 (pass drift p50 0.10 m,
+  p90 0.21 m: a 1 m rule barely touches flat clips); US stairs 0/0; box jumps 0/0. PARC failures 428 here vs 443
+  in the earlier run: batch composition moves borderline clips.
+- **PARC filtered by the teacher**: `scripts/parc/teacher_filter.py` -> `scripts/parc/lists/teacher_keep_1m.txt`
+  (3,033 of 4,681: no benchmark or replay failure, drift <= 1 m, no vaulting/jumping; `.dropped.csv` has each
+  reason) -> `dash_flat_terrain_v5_parc_compact.pt` (base v4_compact; 70,180 clips, 135.0 h, 3,359 terrains).
+  150k teacher on v5 (`teacher_v4b_150k_v5lib.json`): PARC 3 / 60 / 3,033, mean 0.671, pass drift p50 0.41 m p90
+  0.80 m (kept by this teacher's results, so near zero by construction; compare return and drift, not failures).
+  The rest as on v4. `init_from` bin matching by name: 178 clip names occur twice (flat and terrain copy), only
+  the last copy's bins carry over (610 bins start fresh).
+- **Run `dash_teacher_v5`** (GPU 0, started 2026-11-12 ~15:15): init_from v4b 150k, v5 library, same flags plus
+  `--env.root-xy-threshold 1.0`, 50k iterations, cosine `--schedule.lr-decay-start 10000 --schedule.lr-decay-fraction
+  1.0` (2e-4 for 10k, then down to 6e-6). Log `logs/dash_teacher_v5.out`; benchmarks every 10k on the v5 library in
+  `logs/ab_eval/teacher_v5_*k.json`. Early: the xy rule ends ~6% of episodes (height 10%, tilt 1%).
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
