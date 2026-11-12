@@ -91,6 +91,7 @@ class Trainer:
         # env.policy_scan, the teacher).
         terrains = load_terrains(files[0]) if len(files) == 1 else None
         cfg.world_model.state_spec.height_scan = terrains is not None
+        cfg.world_model.xy_threshold = cfg.env.root_xy_threshold
         assert terrains is not None or not cfg.env.policy_scan, "env.policy_scan needs a terrain library"
         self.env = make_env(
             SuperMimicEnvCfgArgs(
@@ -109,6 +110,7 @@ class Trainer:
                 command_delay=cfg.env.command_delay,
                 sampling_mode=cfg.env.sampling_mode,
                 terrain_ratio=cfg.env.terrain_ratio,
+                root_xy_threshold=cfg.env.root_xy_threshold,
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,

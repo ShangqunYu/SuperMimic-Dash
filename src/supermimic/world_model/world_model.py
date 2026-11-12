@@ -22,13 +22,17 @@ class WorldModelCfg:
     input_norm: bool = True  # running mean/std of the state features and the action (updated from sim data)
     term_hidden: tuple[int, ...] = (64, 64)
     state_spec: StateSpecCfg = field(default_factory=StateSpecCfg)
-    # "analytic" (official): P(terminal) = sigmoid((max(|dh| / 0.25, |dtilt| / 0.8) - 1) / softness), no loss.
+    # "analytic" (official): P(terminal) = sigmoid((max(|dh| / 0.25, |dtilt| / 0.8) - 1) / softness), no loss
+    # (with xy_threshold, also |dxy| / xy_threshold inside the max).
     # "learned": the TerminationHead below, fitted with BCE on the sim's labels (weight term_loss_weight).
     termination: str = "analytic"
     termination_softness: float = 0.05
     term_loss_weight: float = 1.0
     height_threshold: float = 0.25
     tilt_threshold: float = 0.8
+    # Root horizontal distance from the reference (m) as a third analytic threshold; None: off. Set from
+    # env.root_xy_threshold by the training loop (sim and imagination end on the same rule).
+    xy_threshold: float | None = None
 
 
 class TerminationHead(nn.Module):
@@ -40,8 +44,8 @@ class TerminationHead(nn.Module):
         self.register_buffer("scale", torch.tensor([1.0 / height_thr, 1.0 / tilt_thr]))
 
     def forward(self, feats: torch.Tensor) -> torch.Tensor:
-        """feats (…, 2) = [height error, tilt error] -> logits (…,)"""
-        x = feats * self.scale
+        """feats (…, ≥2) = [height error, tilt error, ...] -> logits (…,)"""
+        x = feats[..., :2] * self.scale
         return self.mlp(torch.cat([x, x.abs()], dim=-1)).squeeze(-1)
 
 
@@ -53,6 +57,7 @@ class WorldModel(nn.Module):
         self.spec = spec = StateSpec(cfg.state_spec, device, self.num_joints)
         self.dynamics = DynamicsMLP(spec.feat_dim, self.num_joints, spec.ctx_dim, spec.delta_dim, hidden=cfg.hidden, act=cfg.act, layer_norm=cfg.layer_norm, input_norm=cfg.input_norm)
         assert cfg.termination in ("analytic", "learned"), cfg.termination
+        assert cfg.xy_threshold is None or cfg.termination == "analytic", "xy_threshold needs the analytic termination"
         if spec.height_scan:
             from supermimic.terrain.height_scan import HeightScan
 
@@ -96,6 +101,8 @@ class WorldModel(nn.Module):
             return self.term_head(feats)
         c = self.cfg
         x = torch.maximum(feats[..., 0].abs() / c.height_threshold, feats[..., 1].abs() / c.tilt_threshold)
+        if c.xy_threshold is not None:
+            x = torch.maximum(x, feats[..., 2] / c.xy_threshold)
         return (x - 1.0) / c.termination_softness
 
     def termination_logits(self, s_next: torch.Tensor, ref: ReferenceFrame) -> torch.Tensor:

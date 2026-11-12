@@ -5,6 +5,10 @@ no observation/action noise, no reset noise, no domain randomization (foot frict
 deterministic physics. A clip *fails* if the training termination (root height /
 tilt vs reference) fires before the clip ends. Normalised return = sum of per-step
 rewards / (max step reward * number of steps).
+
+The paper's rule never checks where the robot is horizontally, so a policy that skips a move (walks past
+a vault) still passes; each result also records its largest root horizontal distance from the reference,
+and ``summarize`` counts the clips that failed or drifted farther than ``drift_m``.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ class ClipResult:
     failed: bool
     fail_step: int  # -1 if not failed
     terms: dict | None = None  # per-term mean reward per step (dt-scaled)
+    max_xy_err: float = 0.0  # largest root horizontal distance from the reference over the episode (m)
 
 
 def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, dict]:
@@ -96,6 +101,7 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         steps = torch.zeros(num_envs, dtype=torch.long, device=device)
         term_names = list(env.reward_manager.active_terms)
         term_sum = torch.zeros(num_envs, len(term_names), device=device)
+        xy_max = torch.zeros(num_envs, device=device)
         results: dict[int, ClipResult] = {}
         remaining = n_clips
         while remaining > 0:
@@ -104,6 +110,9 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
             ret_sum += rew
             term_sum += env.reward_manager.term_rewards
             steps += 1
+            # done envs were reset inside step: their state is the next clip's
+            xy = torch.linalg.vector_norm(cmd.root_pos_w[:, :2] - cmd.robot_root_pos_w[:, :2], dim=-1)
+            xy_max = torch.where(term | tout, xy_max, torch.maximum(xy_max, xy))
             done = (term | tout) & active
             if done.any():
                 ids = done.nonzero().squeeze(-1)
@@ -120,6 +129,7 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
                             failed=bool(term[e]),
                             fail_step=st if bool(term[e]) else -1,
                             terms={n: float(term_sum[e, i]) / max(st, 1) for i, n in enumerate(term_names)},
+                            max_xy_err=float(xy_max[e]),
                         )
                         remaining -= 1
                         if verbose and (len(results) % 50 == 0 or len(results) == n_clips):
@@ -132,20 +142,23 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
                 cmd.forced_frame[ids] = lib.clip_start[clip_at(nxt[ids])]
                 ret_sum[ids] = 0.0
                 term_sum[ids] = 0.0
+                xy_max[ids] = 0.0
                 steps[ids] = 0
         return [results[i] for i in range(n_clips)]
     finally:
         env.close()
 
 
-def summarize(results: list[ClipResult]) -> dict:
+def summarize(results: list[ClipResult], drift_m: float = 1.0) -> dict:
+    """``failed_or_drift``: clips that failed or whose root got more than ``drift_m`` from the reference horizontally."""
     n = len(results)
     failed = sum(r.failed for r in results)
     mean_ret = sum(r.norm_return for r in results) / max(n, 1)
     # Length-weighted return (paper Fig. 3a uses the benchmark aggregate; weighting by steps).
     tot_steps = sum(r.steps for r in results)
     w_ret = sum(r.norm_return * r.steps for r in results) / max(tot_steps, 1)
-    out = {"clips": n, "failed": failed, "mean_norm_return": mean_ret, "step_weighted_norm_return": w_ret}
+    out = {"clips": n, "failed": failed, "failed_or_drift": sum(r.failed or r.max_xy_err > drift_m for r in results), "drift_m": drift_m,
+           "mean_norm_return": mean_ret, "step_weighted_norm_return": w_ret}
     if results and results[0].terms:
         out["terms"] = {k: sum(r.terms[k] * r.steps for r in results) / max(tot_steps, 1) for k in results[0].terms}
     return out

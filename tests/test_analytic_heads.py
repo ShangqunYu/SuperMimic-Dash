@@ -148,6 +148,11 @@ def test_termination_matches_env(setup):
         np.testing.assert_allclose(f[:, 0].cpu().numpy(), h_env.cpu().numpy(), atol=2e-5)
         assert torch.equal((f[:, 0].abs() > 0.25), theirs_h) or (f[:, 0].abs() - 0.25).abs().min() < 1e-4
         assert torch.equal((f[:, 1].abs() > 0.8), theirs_t) or (f[:, 1].abs() - 0.8).abs().min() < 1e-4
+        xy_env = torch.linalg.vector_norm(cmd.root_pos_w[:, :2] - cmd.robot_root_pos_w[:, :2], dim=-1)
+        np.testing.assert_allclose(f[:, 2].cpu().numpy(), xy_env.cpu().numpy(), atol=2e-5)
+        srt = xy_env.sort().values
+        thr = float(srt[len(srt) // 2 - 1 : len(srt) // 2 + 1].mean())  # between two envs: no ties
+        assert torch.equal(f[:, 2] > thr, sm_term.bad_root_xy(env, "motion", thr))
 
 
 def test_anchor_relative_obs_matches_env():

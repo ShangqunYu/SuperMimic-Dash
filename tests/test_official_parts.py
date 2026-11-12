@@ -49,7 +49,12 @@ def test_analytic_termination_is_soft_threshold():
 
     cfg = WorldModelCfg()
     wm = SimpleNamespace(cfg=cfg, term_head=None)
-    feats = torch.tensor([[0.25, 0.0], [0.0, -0.8], [0.0, 0.0], [0.5, 0.0], [0.1, 0.4]])
+    feats = torch.tensor([[0.25, 0.0, 0.0], [0.0, -0.8, 0.0], [0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.1, 0.4, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 3.0]])
     p = torch.sigmoid(WorldModel._term_logits(wm, feats))
     torch.testing.assert_close(p[:2], torch.full((2,), 0.5))
     assert p[2] < 1e-8 and p[3] > 0.999 and p[4] < 1e-4
+    assert p[5] < 1e-8 and p[6] < 1e-8  # horizontal distance off by default
+    wm.cfg = WorldModelCfg(xy_threshold=1.0)
+    p = torch.sigmoid(WorldModel._term_logits(wm, feats))
+    torch.testing.assert_close(p[5], torch.tensor(0.5))
+    assert p[2] < 1e-8 and p[6] > 0.999

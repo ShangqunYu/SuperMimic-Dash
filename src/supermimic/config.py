@@ -33,6 +33,9 @@ class EnvCfg:
     command_delay: bool = False  # actuator command delay (Dash: 0-25 ms); not modelled by the world model
     sampling_mode: str = "return"
     terrain_ratio: float = 0.0  # share of resets on terrain clips (mixed flat + terrain library)
+    # End tracking episodes when the root is this far (m) from the reference horizontally, in the sim and in
+    # imagination (world_model.xy_threshold follows it); None: off (paper).
+    root_xy_threshold: float | None = None
     replay_capacity: int = 1000
     future_frames: int = 10
     # Official SuperMimic goal: frames 5 control steps apart (0.9 s lookahead with 10 frames), plus each

@@ -1,4 +1,5 @@
-"""Paper terminations: root (pelvis) height deviation and tilt; clip end as time-out.
+"""Paper terminations: root (pelvis) height deviation and tilt; clip end as time-out. Optional: root
+horizontal distance from the reference (``bad_root_xy``, not in the paper).
 
 Reference-relative terms apply to tracking envs only (``track_mask``); velocity-interface envs end
 on a fall (``fall``, Table A.6) or the episode time-out, not at the end of their reference clip."""
@@ -27,6 +28,12 @@ def bad_root_tilt(env: ManagerBasedRlEnv, command_name: str, threshold: float = 
     ref = quat_apply_inverse(cmd.root_quat_w, g)[:, 2]
     rob = quat_apply_inverse(cmd.robot_root_quat_w, g)[:, 2]
     return ((ref - rob).abs() > threshold) & cmd.track_mask
+
+
+def bad_root_xy(env: ManagerBasedRlEnv, command_name: str, threshold: float = 1.0) -> torch.Tensor:
+    """Root more than ``threshold`` (m) from the reference horizontally (the robot skipped or cut a move)."""
+    cmd = cast(MultiClipMotionCommand, env.command_manager.get_term(command_name))
+    return (torch.linalg.vector_norm(cmd.root_pos_w[:, :2] - cmd.robot_root_pos_w[:, :2], dim=-1) > threshold) & cmd.track_mask
 
 
 def clip_end(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:

@@ -136,15 +136,18 @@ class AnalyticHeads:
 
     @staticmethod
     def termination_features(root_pos: torch.Tensor, root_quat: torch.Tensor, ref: ReferenceFrame) -> torch.Tensor:
-        """[height error, tilt error] (N, 2) — the quantities the paper thresholds (0.25 m, 0.8)."""
+        """[height error, tilt error, horizontal distance] (N, 3): the paper thresholds the first two (0.25 m, 0.8);
+        the third is the optional drift termination (env root_xy_threshold)."""
         g = torch.tensor([0.0, 0.0, -1.0], dtype=root_quat.dtype, device=root_quat.device).expand(root_quat.shape[:-1] + (3,))
         tilt = quat_apply_inverse(ref.root_quat_w, g)[..., 2] - quat_apply_inverse(root_quat, g)[..., 2]
         height = ref.root_pos_w[..., 2] - root_pos[..., 2]
-        return torch.stack([height, tilt], dim=-1)
+        xy = torch.linalg.vector_norm(ref.root_pos_w[..., :2] - root_pos[..., :2], dim=-1)
+        return torch.stack([height, tilt, xy], dim=-1)
 
-    def terminated(self, s: torch.Tensor, ref: ReferenceFrame, height_thr: float = 0.25, tilt_thr: float = 0.8) -> torch.Tensor:
+    def terminated(self, s: torch.Tensor, ref: ReferenceFrame, height_thr: float = 0.25, tilt_thr: float = 0.8, xy_thr: float | None = None) -> torch.Tensor:
         f = self.termination_features(s[..., 0:3], s[..., 3:7], ref)  # root body == free-joint root
-        return (f[..., 0].abs() > height_thr) | (f[..., 1].abs() > tilt_thr)
+        out = (f[..., 0].abs() > height_thr) | (f[..., 1].abs() > tilt_thr)
+        return out | (f[..., 2] > xy_thr) if xy_thr is not None else out
 
     @staticmethod
     def root_error_features(s: torch.Tensor, ref: ReferenceFrame) -> torch.Tensor:

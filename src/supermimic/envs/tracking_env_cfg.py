@@ -79,6 +79,7 @@ class SuperMimicEnvCfgArgs:
     seed: int | None = 0
     root_height_threshold: float = 0.25
     root_tilt_threshold: float = 0.8
+    root_xy_threshold: float | None = None  # also end on root horizontal distance from the reference (m); None: off
     # Fall termination of velocity-interface envs (inactive while every env tracks the reference).
     fall_height: float = 0.30
     fall_tilt: float = 0.7
@@ -239,6 +240,8 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         "root_tilt": TerminationTermCfg(func=sm_term.bad_root_tilt, params={"command_name": "motion", "threshold": a.root_tilt_threshold}),
         "fall": TerminationTermCfg(func=sm_term.fall, params={"command_name": "motion", "height": a.fall_height, "tilt": a.fall_tilt}),
     }
+    if a.root_xy_threshold is not None:
+        terminations["root_xy"] = TerminationTermCfg(func=sm_term.bad_root_xy, params={"command_name": "motion", "threshold": a.root_xy_threshold})
 
     if terrains is not None:
         # Per-env terrain boxes (supermimic/terrain/tiles.py): the slot geoms need per-world size, bounds, pose.
