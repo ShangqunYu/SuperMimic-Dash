@@ -624,12 +624,15 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   Test `test_env_smoke.py::test_clip_tail_bins_not_scored` (old sampler: the tail bin got 50% of resets). v6 was
   trained with the old sampler; its benchmarks still improved through the trap (it only wasted samples). A run with
   the fixed sampler may train hard clips better: untested.
-- **Crowd video (2026-11-13):** `scripts/media/crowd_picks.py` picks 100 clips the teacher tracks closely (50 terrain from
-  an eval_groups.py run, 50 expressive BONES-SEED flat clips benchmarked there: dance, jumps, crawling, combat,
-  gestures, injured gaits, ...; one per motion) -> `scripts/media/render_crowd.py` rolls them out in one GPU env
-  batch and draws all 100 in one scene (10 x 10 cells of 5 m, each a raised tile with its clip's terrain cut to the
-  cell; clips loop with a crossfade; camera flies from close to the whole grid). v6 50k: `logs/crowd/crowd_v6_1080p.mp4`
-  (24 s, ~2 min to render on GPU 1; `--width 3840 --height 2160` for 4K).
+- **Crowd videos (2026-11-13):** `scripts/media/crowd_picks.py` picks clips the teacher tracks closely (half terrain from
+  an eval_groups.py run, half expressive BONES-SEED flat clips benchmarked there: dance, jumps, crawling, combat,
+  gestures, injured gaits, ...; `--cells N`, `--per-motion` copies by other actors / PARC augmentations) ->
+  `scripts/media/render_crowd.py` rolls them out in one GPU env batch and draws them all in one scene: a `--cols` x
+  `--rows` grid of 5 m raised tiles, each with its clip's terrain cut to the tile and the reference as a green ghost;
+  clips loop with a crossfade; the camera starts on the hero (longest terrain clip, middle tile) and zooms out to the
+  whole grid, with shadows, haze and near plane following the zoom. Brighter lights than render_hq (whose light look
+  comes from fog 5-14 m away). v6 50k: `logs/crowd/crowd_v6_1080p.mp4` (100, previous style),
+  `logs/crowd/crowd500_v6_1080p.mp4` (500, 25 x 20, 30 s; ~3 min on GPU 1; `--width 3840 --height 2160` for 4K).
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
