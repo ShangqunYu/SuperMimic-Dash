@@ -5,13 +5,13 @@ description = "Reproduction of SuperMimic (arXiv 2610.28480): one differentiable
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  # Base framework, pinned to the exact commit the plan was written against (main, 2026-10-18).
+  # Base framework: mjlab main at its MuJoCo / MuJoCo Warp 4.0.1 upgrade (2026-11-12).
   "mjlab",
   # Declared directly so that our [tool.uv.sources] below apply (mjlab's own sources do not propagate).
   "torch>=2.14.0",
   "warp-lang>=1.15.0",
-  "mujoco-warp~=3.16.0",
-  "mujoco~=3.16.0",
+  "mujoco-warp~=4.0.1",
+  "mujoco-core[rendering]~=4.0.1",
   "numpy",
   "scipy>=1.15",
   "tensorboard>=2.20.0",
@@ -40,7 +40,7 @@ build-backend = "hatchling.build"
 packages = ["src/supermimic"]
 
 [tool.uv.sources]
-mjlab = { git = "https://github.com/mujocolab/mjlab", rev = "8bb2bc9e187797689ec82c78c35019afd2fd0376" }
+mjlab = { git = "https://github.com/mujocolab/mjlab", rev = "c855b31638422abf6f10f044534ede0e2cf3ed86" }
 torch = { index = "pytorch-cu130", marker = "sys_platform != 'darwin'" }
 warp-lang = { index = "nvidia", marker = "sys_platform != 'darwin'" }
 
