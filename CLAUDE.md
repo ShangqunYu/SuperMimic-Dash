@@ -627,12 +627,14 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
 - **Crowd videos (2026-11-13):** `scripts/media/crowd_picks.py` picks clips the teacher tracks closely (half terrain from
   an eval_groups.py run, half expressive BONES-SEED flat clips benchmarked there: dance, jumps, crawling, combat,
   gestures, injured gaits, ...; `--cells N`, `--per-motion` copies by other actors / PARC augmentations) ->
-  `scripts/media/render_crowd.py` rolls them out in one GPU env batch and draws them all in one scene: a `--cols` x
-  `--rows` grid of 5 m raised tiles, each with its clip's terrain cut to the tile and the reference as a green ghost;
-  clips loop with a crossfade; the camera starts on the hero (longest terrain clip, middle tile) and zooms out to the
-  whole grid, with shadows, haze and near plane following the zoom. Brighter lights than render_hq (whose light look
-  comes from fog 5-14 m away). v6 50k: `logs/crowd/crowd_v6_1080p.mp4` (100, previous style),
-  `logs/crowd/crowd500_v6_1080p.mp4` (500, 25 x 20, 30 s; ~3 min on GPU 1; `--width 3840 --height 2160` for 4K).
+  `scripts/media/render_crowd.py` rolls them out in one GPU env batch (`--cache` keeps them) and draws them all in
+  one scene: a `--cols` x `--rows` grid of 5 m raised tiles, each with its clip's terrain cut to the tile and the
+  reference as a green ghost; clips loop with a crossfade. Camera: close on the hero (longest terrain clip, middle
+  tile), an outward spiral over the grid (stretched to its aspect), a final pull-back to the whole grid; shadow box,
+  haze and near plane follow the camera distance. `--stills t1,t2` writes single frames for quick looks. Lights as
+  render_hq; the scene's MjData needs mj_forward (or mj_camlight): mj_kinematics leaves light directions at zero, so
+  only the headlight shone (the first crowd videos were dark and flat for that reason). v6 50k, 500 robots (25 x 20):
+  `logs/crowd/crowd500_v6_spiral.mp4` (70 s, ~6 min on GPU 1; `_share.mp4` is a 28 MB 2-pass copy for chat).
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
