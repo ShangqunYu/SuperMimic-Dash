@@ -572,6 +572,17 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   kept-clip failures are fast PARC running clips the 150k trailed by 0.5-0.9 m. **Teacher:
   `logs/dash_teacher_v5/ckpt_0050000.pt`.** Videos: `logs/teacher_videos/v5_50k/` (`compare_150k` /
   `compare_v5_50k`: same clips, both teachers; `new_failures`).
+- **Feet sink 2-5 cm into terrain boxes (found 2026-11-12, user saw it in a video).** Real, not rendering (the foot
+  visual mesh and its collision capsule, r 1.2 cm, share the lowest point). `scripts/diag/sim_contacts.py` reads the
+  contacts inside the GPU sim: no overflow (nefc <= 32 of njmax 300), contact normals vertical (sinking into box
+  tops), same solref/solimp on floor and slot boxes, slot rbound/aabb written at reset. The reference foot is <= 0.7 cm
+  deep, so it is not imitation. Cause: MuJoCo soft contacts (solref 0.02 s at dt 5 ms) overshoot ~ impact speed x
+  time constant at touchdown; PARC running / step-downs land harder than flat jogging. v5 50k max depth: running
+  clip 5.0 cm, boxes 4.7, teaser 2.7, flat jog 1.6 (p90 on flat 0.5). With `SOLREF=0.01` (stiffest MuJoCo advises
+  at this dt): 3.5, 1.0, 1.2, 0.8. Adding solimp 0.95/0.99 trips the line-search iteration limit (overflow 0x400).
+  **MuJoCo 4.0.1** (branch `mujoco4`: mjlab main c855b316, MuJoCo / MuJoCo Warp 4.0.1; our env runs unchanged):
+  same depths with defaults; MuJoCo Warp rejects `mjENBL_SPECULATIVE` ("unsupported"), and the IPC flag is for flex
+  (deformables). Speculative contacts would only stop tunnelling through thin geoms within a step anyway.
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
