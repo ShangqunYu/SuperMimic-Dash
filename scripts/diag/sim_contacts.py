@@ -3,7 +3,8 @@ and overflow flags per env, for a policy playing the given library clips (nomina
 
   python scripts/diag/sim_contacts.py ckpt clip [clip ...] [--lib PATH]
 
-Env SOLREF=<timeconst> and DMIN/DMAX=<solimp> override every geom before the sim is built; SPEC=7 sets
+Contacts as the checkpoint was trained (env.contact_timeconst). Env SOLREF=<timeconst> (passed as
+contact_timeconst) and DMIN/DMAX=<solimp> override every geom before the sim is built; SPEC=7 sets
 mjENBL_SPECULATIVE (MuJoCo 4; MuJoCo Warp 4.0.1 rejects it). Deepest contacts (> 2.5 cm) are listed with
 their normal (from geom[0] to geom[1]).
 """
@@ -24,8 +25,6 @@ _apply = mjsim.MujocoCfg.apply
 
 def _apply_overrides(self, model):
     _apply(self, model)
-    if os.environ.get("SOLREF"):
-        model.geom_solref[:, 0] = float(os.environ["SOLREF"])
     if os.environ.get("DMAX"):
         model.geom_solimp[:, 0] = float(os.environ.get("DMIN", os.environ["DMAX"]))
         model.geom_solimp[:, 1] = float(os.environ["DMAX"])
@@ -46,7 +45,10 @@ def main():
     ckpt, clips = args[0], args[1:]
     dev = "cuda:0"
     policy, pcfg = load_policy_from_checkpoint(ckpt, dev)
-    env = make_env(SuperMimicEnvCfgArgs(npz_files=[lib], robot="dash", num_envs=len(clips), compact_library=True, **goal_env_kwargs(pcfg),
+    kw = goal_env_kwargs(pcfg)
+    if os.environ.get("SOLREF"):
+        kw["contact_timeconst"] = float(os.environ["SOLREF"])
+    env = make_env(SuperMimicEnvCfgArgs(npz_files=[lib], robot="dash", num_envs=len(clips), compact_library=True, **kw,
                                         episode_length_s=1e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
                                         sampling_mode="start", seed=0, root_height_threshold=1e3, root_tilt_threshold=1e3, record_transitions=False),
                    device=dev)

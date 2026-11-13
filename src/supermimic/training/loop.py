@@ -111,6 +111,7 @@ class Trainer:
                 sampling_mode=cfg.env.sampling_mode,
                 terrain_ratio=cfg.env.terrain_ratio,
                 root_xy_threshold=cfg.env.root_xy_threshold,
+                contact_timeconst=cfg.env.contact_timeconst,
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,

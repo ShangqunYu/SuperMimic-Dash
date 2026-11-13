@@ -51,6 +51,19 @@ class QuietSimulationCfg(SimulationCfg):
 
 
 @dataclass
+class ContactMujocoCfg(MujocoCfg):
+    """MujocoCfg that can also set every geom's contact time constant (solref[0], s). MuJoCo Warp has no
+    contact override flag, so the compiled model's geoms are edited (a contact mixes its two geoms' solref)."""
+
+    contact_timeconst: float | None = None
+
+    def apply(self, model) -> None:
+        super().apply(model)
+        if self.contact_timeconst is not None:
+            model.geom_solref[:, 0] = self.contact_timeconst
+
+
+@dataclass
 class SuperMimicEnvCfgArgs:
     npz_files: list[str]
     robot: str = "g1"  # supermimic.robots name
@@ -80,6 +93,9 @@ class SuperMimicEnvCfgArgs:
     root_height_threshold: float = 0.25
     root_tilt_threshold: float = 0.8
     root_xy_threshold: float | None = None  # also end on root horizontal distance from the reference (m); None: off
+    # Contact time constant of every geom (s); None: the model's (0.02). Feet sink ~ impact speed x this at
+    # touchdown; 0.01 (2 x timestep) is the stiffest MuJoCo keeps stable.
+    contact_timeconst: float | None = None
     # Fall termination of velocity-interface envs (inactive while every env tracks the reference).
     fall_height: float = 0.30
     fall_tilt: float = 0.7
@@ -262,7 +278,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         terminations=terminations,
         recorders=recorders,
         viewer=ViewerConfig(origin_type=ViewerConfig.OriginType.ASSET_BODY, entity_name="robot", body_name=robot.anchor_body, distance=2.8, fovy=55.0, elevation=-5.0, azimuth=120.0),
-        sim=QuietSimulationCfg(nconmax=robot.nconmax, njmax=robot.njmax, mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20)),
+        sim=QuietSimulationCfg(nconmax=robot.nconmax, njmax=robot.njmax, mujoco=ContactMujocoCfg(timestep=0.005, iterations=10, ls_iterations=20, contact_timeconst=a.contact_timeconst)),
         decimation=4,
         episode_length_s=a.episode_length_s,
         seed=a.seed,

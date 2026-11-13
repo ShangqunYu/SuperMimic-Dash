@@ -3,10 +3,12 @@ random flat clips (the same ones in every library built on v4_compact), and with
 the US stairs (12-20 cm risers) and the 25-31 cm box jumps.
 
   python scripts/eval_groups.py out.json ckpt.pt [--lib PATH] [--only parc,flat2k] [--drift-m 1.0] [--randomize]
+      [--contact-timeconst S]
 
 Per group: failures by the paper rule (root height / tilt), and failures or passes whose root got more than
 --drift-m from the reference horizontally (eval/benchmark.py). Also PARC by motion type, US stairs by riser
-and direction, box jumps by height, and every clip's result under "clips".
+and direction, box jumps by height, and every clip's result under "clips". Contacts as the checkpoint was
+trained (env.contact_timeconst) unless --contact-timeconst (0.02: the model's default).
 """
 
 from __future__ import annotations
@@ -70,15 +72,19 @@ def main():
     ap.add_argument("--only", help="comma-separated groups")
     ap.add_argument("--drift-m", type=float, default=1.0)
     ap.add_argument("--randomize", action="store_true", help="training randomization (noise, DR) instead of nominal")
+    ap.add_argument("--contact-timeconst", type=float, help="every geom's contact time constant (s); default: the checkpoint's")
     a = ap.parse_args()
     g, names = groups(Path(a.lib))
     if a.only:
         g = {k: v for k, v in g.items() if k in a.only.split(",")}
     policy, cfg = load_policy_from_checkpoint(a.ckpt, "cuda:0")
     ids = [i for idx in g.values() for i in idx]
+    kw = goal_env_kwargs(cfg)
+    if a.contact_timeconst is not None:
+        kw["contact_timeconst"] = a.contact_timeconst
     res = run_benchmark(policy, [a.lib], device="cuda:0", num_envs=1024, robot="dash", num_clips=len(names), verbose=False, randomize=a.randomize,
-                        clip_ids=ids, **goal_env_kwargs(cfg))
-    out, k = {"ckpt": a.ckpt, "lib": a.lib, "drift_m": a.drift_m, "groups": {}, "clips": {}}, 0
+                        clip_ids=ids, **kw)
+    out, k = {"ckpt": a.ckpt, "lib": a.lib, "drift_m": a.drift_m, "contact_timeconst": kw["contact_timeconst"], "groups": {}, "clips": {}}, 0
     for name, idx in g.items():
         r = res[k : k + len(idx)]
         k += len(idx)

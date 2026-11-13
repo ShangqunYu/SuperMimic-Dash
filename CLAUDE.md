@@ -583,6 +583,15 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   **MuJoCo 4.0.1** (branch `mujoco4`: mjlab main c855b316, MuJoCo / MuJoCo Warp 4.0.1; our env runs unchanged):
   same depths with defaults; MuJoCo Warp rejects `mjENBL_SPECULATIVE` ("unsupported"), and the IPC flag is for flex
   (deformables). Speculative contacts would only stop tunnelling through thin geoms within a step anyway.
+- **Stiffer contacts: `--env.contact-timeconst S`** (default None: the model's 0.02 s) sets every geom's solref[0]
+  in the compiled model (`ContactMujocoCfg`, sim only). Saved in the checkpoint config: `goal_env_kwargs` passes it,
+  so benchmarks, renders and diagnostics play a checkpoint in the contacts it was trained in;
+  `eval_groups.py --contact-timeconst` overrides (0.02 = default physics). **Run `dash_teacher_v6`** (GPU 0, started
+  2026-11-12 ~22:20): init_from v5 50k, same flags as v5 plus `--env.contact-timeconst 0.01`, 50k iterations, cosine
+  from the start (`--schedule.lr-decay-start 0`: same library, so no 2e-4 phase). Log `logs/dash_teacher_v6.out`;
+  start point (v5 50k under 0.01 contacts, no retraining) `logs/ab_eval/teacher_v5_50k_stiff.json`, then every 10k
+  `teacher_v6_*k.json`. World model one-step error at the start 0.119 (v5 run's start 0.045): it learned the softer
+  contacts.
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 

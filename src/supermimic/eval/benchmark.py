@@ -46,18 +46,20 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
 
 
 def goal_env_kwargs(config: dict) -> dict:
-    """SuperMimicEnvCfgArgs fields that set a checkpoint's goal layout, from its saved config (older
-    checkpoints lack the newer fields: consecutive goal frames, no root orientation, no terrain scan)."""
+    """SuperMimicEnvCfgArgs fields that set a checkpoint's goal layout and its contact stiffness, from its saved
+    config (older checkpoints lack the newer fields: consecutive goal frames, no root orientation, no terrain
+    scan, the model's contacts)."""
     e = config["env"]
     return dict(future_frames=e["future_frames"], goal_stride=e.get("goal_stride", 1), goal_root_ori=e.get("goal_root_ori", False),
-                anchor_obs=e.get("anchor_obs", False), policy_scan=e.get("policy_scan", False))
+                anchor_obs=e.get("anchor_obs", False), policy_scan=e.get("policy_scan", False), contact_timeconst=e.get("contact_timeconst"))
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1", num_clips: int | None = None, randomize: bool = False, goal_stride: int = 1, goal_root_ori: bool = False, policy_scan: bool = False, clip_ids: list[int] | None = None) -> list[ClipResult]:
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, robot: str = "g1", num_clips: int | None = None, randomize: bool = False, goal_stride: int = 1, goal_root_ori: bool = False, policy_scan: bool = False, clip_ids: list[int] | None = None, contact_timeconst: float | None = None) -> list[ClipResult]:
     """``npz_files`` may be one packed .pt library; then ``num_clips`` (its clip count) sizes the env batch.
     ``randomize`` turns on the training randomization (observation noise, sim and hardware DR; same seed for every policy).
-    ``clip_ids``: evaluate only these library clips (results in that order)."""
+    ``clip_ids``: evaluate only these library clips (results in that order). ``contact_timeconst``: as in
+    SuperMimicEnvCfgArgs (goal_env_kwargs passes the checkpoint's)."""
     packed = len(npz_files) == 1 and str(npz_files[0]).endswith(".pt")
     n_total = len(clip_ids) if clip_ids is not None else (num_clips if packed and num_clips else len(npz_files))
     num_envs = min(num_envs or 1024, n_total)
@@ -80,6 +82,7 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         goal_root_ori=goal_root_ori,
         policy_scan=policy_scan,
         compact_library=packed,
+        contact_timeconst=contact_timeconst,
     )
     env = make_env(args, device=device)
     try:

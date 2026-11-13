@@ -36,6 +36,9 @@ class EnvCfg:
     # End tracking episodes when the root is this far (m) from the reference horizontally, in the sim and in
     # imagination (world_model.xy_threshold follows it); None: off (paper).
     root_xy_threshold: float | None = None
+    # Contact time constant of every geom (s; sim only); None: the robot model's (0.02 s). 0.01: feet sink
+    # about half as deep at touchdown.
+    contact_timeconst: float | None = None
     replay_capacity: int = 1000
     future_frames: int = 10
     # Official SuperMimic goal: frames 5 control steps apart (0.9 s lookahead with 10 frames), plus each
