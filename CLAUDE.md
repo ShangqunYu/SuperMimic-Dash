@@ -550,6 +550,28 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
   `--env.root-xy-threshold 1.0`, 50k iterations, cosine `--schedule.lr-decay-start 10000 --schedule.lr-decay-fraction
   1.0` (2e-4 for 10k, then down to 6e-6). Log `logs/dash_teacher_v5.out`; benchmarks every 10k on the v5 library in
   `logs/ab_eval/teacher_v5_*k.json`. Early: the xy rule ends ~6% of episodes (height 10%, tilt 1%).
+  Finished 2026-11-12 ~20:35 (5.3 h, 2.6-2.9 it/s alongside another user's GPU jobs). v5 library, nominal
+  (failed / failed or drift > 1 m, mean return; PARC also pass drift p50 / p90):
+
+  | | PARC kept (3,033) | v3 terrain (2,402) | flat sample (2,000) | US stairs (306) | US box jumps (336) |
+  |---|---|---|---|---|---|
+  | v4b 150k (start) | 3 / 60, 0.671; 0.41 / 0.80 m | 0 / 0, 0.918 | 0 / 5, 0.928 | 0 / 0, 0.930 | 0 / 0, 0.840 |
+  | v5 10k | 134 / 177, 0.613; 0.38 / 0.64 | 6 / 7, 0.903 | 2 / 17, 0.910 | 0 / 0, 0.916 | 0 / 0, 0.792 |
+  | v5 20k | 140 / 190, 0.617; 0.41 / 0.70 | 13 / 13, 0.901 | 4 / 16, 0.908 | 0 / 0, 0.910 | 0 / 0, 0.798 |
+  | v5 30k | 105 / 140, 0.639; 0.37 / 0.59 | 3 / 3, 0.919 | 0 / 8, 0.917 | 0 / 0, 0.906 | 5 / 5, 0.810 |
+  | v5 40k | 96 / 114, 0.650; 0.36 / 0.59 | 0 / 1, 0.932 | 1 / 5, 0.922 | 0 / 0, 0.932 | 0 / 0, 0.830 |
+  | **v5 50k (final)** | 74 / 89, 0.661; 0.36 / 0.58 | 0 / 0, **0.935** | 0 / 3, 0.926 | 0 / 0, **0.935** | 0 / 0, 0.841 |
+
+  The 2e-4 restart cost precision everywhere for the first ~25k (as v4's constant LR); the decay recovered it.
+  150k's 3 kept-PARC failures are low by construction (the list is its own passes). On all 4,681 PARC clips (v4
+  library, `teacher_v5_50k_v4lib.json`; same groups as `teacher_v4b_150k_groups.json`): 150k 428 / 1,638, 0.593 ->
+  50k 717 / 1,038, 0.576. Kept clips 3 / 55 -> 70 / 86 (return 0.671 -> 0.661; on the 2,958 both pass, return
+  -0.004, drift p90 0.80 -> 0.58 m); dropped clips (not trained on) 425 / 1,583 -> 647 / 952: fewer silent skips, more
+  honest falls. By type, failed / failed or drift: vaulting 54/210 (was 18/200), jumping 19/23 (2/24), teaser 322/392
+  (197/638), boxes 177/214 (133/346), running 77/115 (23/300), platform 63/79 (52/126), stairs 5/5 (3/4). Most new
+  kept-clip failures are fast PARC running clips the 150k trailed by 0.5-0.9 m. **Teacher:
+  `logs/dash_teacher_v5/ckpt_0050000.pt`.** Videos: `logs/teacher_videos/v5_50k/` (`compare_150k` /
+  `compare_v5_50k`: same clips, both teachers; `new_failures`).
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
