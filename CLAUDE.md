@@ -604,8 +604,8 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
 
   Training randomization (`--randomize`, `*_rand.json`): v5 50k under 0.01 PARC 363 / 519, 0.559 (running 211 / 330),
   terrain 5 / 5, 0.926, flat 4 / 9, 0.914; v6 36k 200 / 368, 0.599; **v6 50k 169 / 342, 0.609**, terrain 1 / 1, 0.943,
-  flat 4 / 8, 0.917, stairs 0.931, jumps 1 / 1, 0.826. The fine-tune matters under randomization (stiff contacts + DR
-  halve the untuned teacher's PARC passes margin). Foot depth (`scripts/diag/sim_contacts.py`, max / p90 in
+  flat 4 / 8, 0.917, stairs 0.931, jumps 1 / 1, 0.826. The fine-tune matters most under randomization: untuned, the v5
+  teacher fails twice as many PARC clips in stiff contacts with DR. Foot depth (`scripts/diag/sim_contacts.py`, max / p90 in
   contact), v5 50k in 0.02 -> v6 50k in 0.01: PARC running_006 3.5 / 1.9 -> 1.5 / 0.6 cm, teaser_3269 2.8 / 0.8 ->
   0.9 / 0.25, boxes_456 4.7 / 2.3 -> 1.3 / 0.4, flat jog 1.6 / 0.5 -> 0.6 / 0.15. **Teacher:
   `logs/dash_teacher_v6/ckpt_0050000.pt`** (plays in 0.01 contacts: its config carries it). Videos (same clips, both
