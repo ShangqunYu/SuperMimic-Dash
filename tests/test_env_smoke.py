@@ -124,3 +124,40 @@ def test_episode_never_crosses_clip_boundary(env):
         obs, rew, term, tout, _ = env.step(torch.zeros(env.num_envs, 29, device=env.device))
         fired = fired or bool(tout[0]) or bool(term[0])
     assert fired
+
+
+def test_clip_tail_bins_not_scored(env):
+    """Bins too close to a clip's end take no hard or memory share whatever they carry, and short clip-end
+    returns do not update any bin (the reset transient dominates them)."""
+    cmd = env.command_manager.get_term("motion")
+    lib, cfg = cmd.library, cmd.cfg
+    saved = (cmd.bin_return.clone(), cmd.bin_memory.clone())
+    try:
+        left = lib.clip_last[lib.bin_clip] - lib.bin_start
+        assert torch.equal(cmd.scorable_bin, left >= cfg.min_horizon)
+        tail = int(torch.nonzero(~cmd.scorable_bin)[0])
+        inner = int(torch.nonzero(cmd.scorable_bin)[0])
+
+        def share(b):
+            f = cmd._sample_frames(20000)
+            return float(((f >= lib.bin_start[b]) & (f < lib.bin_end[b])).float().mean())
+
+        cmd.bin_return.fill_(cfg.g_max)
+        cmd.bin_return[tail] = -100.0
+        cmd.bin_memory[tail] = 1e6
+        assert share(tail) < 0.01
+        cmd.bin_return[inner] = -100.0
+        assert share(inner) > 0.3  # the hard share (0.4) goes to the scorable bin
+
+        # A 3-step episode ending at the clip end, rewards very negative: the bin keeps its value.
+        e, c = 0, int(lib.bin_clip[tail])
+        cmd.bin_return.fill_(cfg.g_max)
+        cmd.ep_len[e] = 3
+        cmd.ep_rewards[e, :3] = -1.0
+        cmd.ep_bins[e, :3] = tail
+        cmd.frame[e] = lib.clip_last[c]
+        cmd._finalize_episodes(torch.tensor([e], device=env.device))
+        assert torch.all(cmd.bin_return == cfg.g_max)
+    finally:
+        cmd.bin_return.copy_(saved[0])
+        cmd.bin_memory.copy_(saved[1])

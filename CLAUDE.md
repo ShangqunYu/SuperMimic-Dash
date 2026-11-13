@@ -586,12 +586,44 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
 - **Stiffer contacts: `--env.contact-timeconst S`** (default None: the model's 0.02 s) sets every geom's solref[0]
   in the compiled model (`ContactMujocoCfg`, sim only). Saved in the checkpoint config: `goal_env_kwargs` passes it,
   so benchmarks, renders and diagnostics play a checkpoint in the contacts it was trained in;
-  `eval_groups.py --contact-timeconst` overrides (0.02 = default physics). **Run `dash_teacher_v6`** (GPU 0, started
-  2026-11-12 ~22:20): init_from v5 50k, same flags as v5 plus `--env.contact-timeconst 0.01`, 50k iterations, cosine
-  from the start (`--schedule.lr-decay-start 0`: same library, so no 2e-4 phase). Log `logs/dash_teacher_v6.out`;
-  start point (v5 50k under 0.01 contacts, no retraining) `logs/ab_eval/teacher_v5_50k_stiff.json`, then every 10k
-  `teacher_v6_*k.json`. World model one-step error at the start 0.119 (v5 run's start 0.045): it learned the softer
-  contacts.
+  `eval_groups.py --contact-timeconst` overrides (0.02 = default physics). **Run `dash_teacher_v6`** (GPU 0,
+  2026-11-12 22:44 to 2026-11-13 03:30, 4.8 h, 2.9 it/s): init_from v5 50k, same flags as v5 plus
+  `--env.contact-timeconst 0.01`, 50k iterations, cosine from the start (`--schedule.lr-decay-start 0`: same library,
+  so no 2e-4 phase). Log `logs/dash_teacher_v6.out`. World model one-step error at the start 0.119 (it learned the
+  softer contacts), 0.038 by 800 iterations. v5 library, contacts 0.01 (failed / failed or drift > 1 m, mean return):
+
+  | | PARC kept (3,033) | v3 terrain | flat sample | US stairs | US box jumps |
+  |---|---|---|---|---|---|
+  | v5 50k, contacts 0.02 (its own) | 74 / 89, 0.661 | 0 / 0, 0.935 | 0 / 3, 0.926 | 0 / 0, 0.935 | 0 / 0, 0.841 |
+  | v5 50k, contacts 0.01 (start) | 68 / 86, 0.664 | 0 / 0, 0.935 | 3 / 6, 0.924 | 0 / 0, 0.936 | 0 / 0, 0.838 |
+  | v6 10k | 111 / 141, 0.649 | 1 / 1, 0.928 | 5 / 19, 0.912 | 0 / 0, 0.924 | 0 / 0, 0.815 |
+  | v6 20k | 110 / 125, 0.657 | 3 / 3, 0.931 | 4 / 10, 0.915 | 0 / 0, 0.924 | 0 / 0, 0.819 |
+  | v6 30k | 70 / 83, 0.670 | 0 / 0, 0.944 | 5 / 12, 0.920 | 0 / 0, 0.928 | 0 / 0, 0.840 |
+  | v6 40k | 67 / 75, 0.686 | 0 / 1, 0.949 | 4 / 8, 0.925 | 0 / 0, 0.935 | 0 / 0, 0.852 |
+  | **v6 50k** | **63 / 68, 0.689** | 0 / 0, **0.952** | 4 / 6, 0.927 | 0 / 0, **0.940** | 0 / 0, **0.859** |
+
+  Training randomization (`--randomize`, `*_rand.json`): v5 50k under 0.01 PARC 363 / 519, 0.559 (running 211 / 330),
+  terrain 5 / 5, 0.926, flat 4 / 9, 0.914; v6 36k 200 / 368, 0.599; **v6 50k 169 / 342, 0.609**, terrain 1 / 1, 0.943,
+  flat 4 / 8, 0.917, stairs 0.931, jumps 1 / 1, 0.826. The fine-tune matters under randomization (stiff contacts + DR
+  halve the untuned teacher's PARC passes margin). Foot depth (`scripts/diag/sim_contacts.py`, max / p90 in
+  contact), v5 50k in 0.02 -> v6 50k in 0.01: PARC running_006 3.5 / 1.9 -> 1.5 / 0.6 cm, teaser_3269 2.8 / 0.8 ->
+  0.9 / 0.25, boxes_456 4.7 / 2.3 -> 1.3 / 0.4, flat jog 1.6 / 0.5 -> 0.6 / 0.15. **Teacher:
+  `logs/dash_teacher_v6/ckpt_0050000.pt`** (plays in 0.01 contacts: its config carries it). Videos (same clips, both
+  teachers): `logs/teacher_videos/v6_50k/{v5_50k_soft,v6_50k_stiff}/`.
+- **Sampler trap: clip-tail bins (found in dash_teacher_v6, fixed 2026-11-13).** Training return fell from 0.60 to
+  0.29 at 37.6k with no change in episode length or ends: one bin, the last 6 frames of the flat kneeling clip
+  `dash_leaning_idle_003__A246_M`, went to bin return -2.9 (38k) ... -9.2 (50k) and took the whole hard share
+  (softmax temperature 25) and 66% of the memory share: ~25% of all resets for 12k iterations. An episode started a
+  few steps before a clip's end is mostly the reset transient (previous action zero: action-rate and joint-limit
+  penalties; the kneeling pose needs a large first action), and "horizon" normalization multiplies a 2-5 step return
+  up to 1 / (1 - gamma) = 100x. Not specific to stiff contacts: v5's estimate of the same bin was +5.2 and drifting
+  down. Wider: 35,461 bins (6.8%) start < 25 frames from their clip's end; at v6 30k the hardest bins were PARC
+  running clip tails, at 36k 88% of the memory share sat on such bins (v5 50k: one bin held 55%). Fix
+  (`commands.py`): returns covering < `min_horizon` (25) steps are not scored, and bins that cannot be scored keep out
+  of the hard and memory shares whatever value they carry (so init_from a checkpoint with stale tail values is safe).
+  Test `test_env_smoke.py::test_clip_tail_bins_not_scored` (old sampler: the tail bin got 50% of resets). v6 was
+  trained with the old sampler; its benchmarks still improved through the trap (it only wasted samples). A run with
+  the fixed sampler may train hard clips better: untested.
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 

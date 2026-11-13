@@ -84,6 +84,10 @@ class MultiClipMotionCommand(CommandTerm):
         # Return-based reset sampling state.
         self.bin_return = torch.full((lib.num_bins,), cfg.g_max, device=self.device)
         self.bin_memory = torch.full((lib.num_bins,), 1.0 / lib.num_bins, dtype=torch.float64, device=self.device)
+        # Bins that can be scored: with "horizon" returns, at least min_horizon frames from the bin start to the
+        # clip's last frame (_finalize_episodes drops shorter horizons). The others keep out of the hard and
+        # memory shares, whatever value they carry (e.g. from a checkpoint without this rule).
+        self.scorable_bin = (lib.clip_last[lib.bin_clip] - lib.bin_start >= cfg.min_horizon) if cfg.return_norm == "horizon" else torch.ones(lib.num_bins, dtype=torch.bool, device=self.device)
         # Bins of terrain clips, for the guaranteed terrain share of resets (cfg.terrain_ratio).
         self.terrain_bin = lib.clip_tile[lib.frame_clip[lib.bin_start]] >= 0
         self.max_ep_steps = min(int(math.ceil(env.cfg.episode_length_s / env.step_dt)) + 2, cfg.max_logged_steps)
@@ -266,6 +270,10 @@ class MultiClipMotionCommand(CommandTerm):
             covers_rest = terminated | (truncated & (self.bootstrap_fn is not None))
             h = steps_left + (covers_rest.long() * unreached)[:, None]
             rtg = rtg / (1.0 - cfg.gamma ** h.double())
+            # A few steps say nothing about a bin: an episode started just before a clip's end is mostly the
+            # reset transient (the previous action is zero), and the rescaling multiplies it up to 1 / (1 - gamma)
+            # times. Without this a clip's last bin could take the whole hard share (dash_teacher_v6).
+            tmask = tmask & (h >= cfg.min_horizon)
         valid = tmask.reshape(-1)
         b = bins.reshape(-1)[valid]
         g = rtg.reshape(-1)[valid].float()
@@ -293,17 +301,19 @@ class MultiClipMotionCommand(CommandTerm):
             f = torch.randint(0, lib.num_frames, (n,), device=self.device)
             return torch.minimum(f, lib.last_frame_of(f) - 2).clamp_min(0)
         assert mode == "return"
-        hard = torch.softmax(-cfg.softmax_temp * self.bin_return / cfg.g_max, dim=0)
+        ret = torch.where(self.scorable_bin, self.bin_return, cfg.g_max)
+        hard = torch.softmax(-cfg.softmax_temp * ret / cfg.g_max, dim=0)
         if cfg.memory_mode == "cumulative":
             # Official SuperMimic: accumulated effort sum(hard^2) over the whole run, so bins that were hard
             # once keep a share of practice after they are learned.
             self.bin_memory += hard.square()
         else:
             self.bin_memory = (1 - cfg.memory_alpha) * self.bin_memory + cfg.memory_alpha * hard
+        mem = torch.where(self.scorable_bin, self.bin_memory, 0.0)
         p = (
             cfg.uniform_ratio / lib.num_bins
             + cfg.hard_ratio * hard
-            + cfg.memory_ratio * (self.bin_memory / self.bin_memory.sum()).float()
+            + cfg.memory_ratio * (mem / mem.sum().clamp_min(1e-300)).float()
         )
         p = p / p.sum()
         if cfg.terrain_ratio > 0 and bool(self.terrain_bin.any()):
@@ -527,6 +537,8 @@ class MultiClipMotionCommandCfg(CommandTermCfg):
     # "none": raw discounted return-to-go, as in the paper (plan D14).
     return_norm: Literal["horizon", "none"] = "horizon"
     min_remaining_steps: int = 100
+    # "horizon": returns covering fewer steps than this are not scored (clip ends; see _finalize_episodes).
+    min_horizon: int = 25
     max_logged_steps: int = 1024
     compact_library: bool = False
     library_fp16: bool = True
