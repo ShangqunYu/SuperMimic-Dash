@@ -24,6 +24,7 @@ import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -60,6 +61,8 @@ def is_locomotion(name: str) -> bool:
 def terrain_category(name: str) -> str:
     """Skill of a terrain clip, for balanced sampling: stairs, box jump-over, 50 cm box up / down, PARC type, other."""
     n = name.lower()
+    if n.startswith("aug/"):
+        return "aug_" + n.split("/")[1]
     if n.startswith("parc/"):
         return "stairs" if "stairs" in n else "parc_" + next((k for k in ("boxes", "running", "teaser", "platform") if k in n), "other")
     if "stairs" in n or "_us_r" in n:
@@ -124,33 +127,53 @@ class Window:
 
 
 class GenData:
-    def __init__(self, library: str | Path, device: str = "cuda:0", hist: int = 10, fut: int = 60, val_every: int = 20, nj: int = 18,
-                 terrain_balance: float = 0.0):
+    def __init__(self, library: str | Path | list, device: str = "cuda:0", hist: int = 10, fut: int = 60, val_every: int = 20, nj: int = 18,
+                 terrain_balance: float = 0.0, terrain_share: list[float] | None = None):
+        """library: one packed library or several (their terrains are appended; flat locomotion comes from any).
+        terrain_share: per library, its share of the terrain windows sampled (default: by window count)."""
         self.device = torch.device(device)
         self.H, self.F, self.nj = hist, fut, nj
-        pack = torch.load(library, map_location="cpu", weights_only=False, mmap=True)
-        names = list(pack["names"])
-        starts, lens, tiles = np.asarray(pack["starts"]), np.asarray(pack["lengths"]), np.asarray(pack["clip_tile"])
-        sel = [i for i in range(len(names)) if lens[i] >= fut + 2 and (tiles[i] >= 0 or is_locomotion(names[i]))]
-        self.clip_names = [names[i] for i in sel]
-        self.clip_tile = torch.as_tensor(tiles[sel], device=self.device)
-        self.clip_len = torch.as_tensor(lens[sel], device=self.device)
+        libs = [library] if isinstance(library, (str, Path)) else list(library)
+        names_all, tiles_all, lens_all, lib_of, refs, terrains = [], [], [], [], [], []
+        for li, lib in enumerate(libs):
+            pack = torch.load(lib, map_location="cpu", weights_only=False, mmap=True)
+            names = list(pack["names"])
+            starts, lens, tiles = np.asarray(pack["starts"]), np.asarray(pack["lengths"]), np.asarray(pack["clip_tile"])
+            sel = [i for i in range(len(names)) if lens[i] >= fut + 2 and (tiles[i] >= 0 or is_locomotion(names[i]))]
+            names_all += [names[i] for i in sel]
+            tiles_all.append(np.where(tiles[sel] >= 0, tiles[sel] + len(terrains), -1))
+            lens_all.append(lens[sel])
+            lib_of += [li] * len(sel)
+            refs.append(torch.cat([pack["ref"][int(starts[i]) : int(starts[i] + lens[i])] for i in sel]))
+            ts = load_terrains(lib)
+            terrains += list(ts.terrains) if ts is not None else []
+        self.clip_names = names_all
+        tiles, lens, lib_of = np.concatenate(tiles_all), np.concatenate(lens_all), np.array(lib_of)
+        self.clip_tile = torch.as_tensor(tiles, device=self.device)
+        self.clip_len = torch.as_tensor(lens, device=self.device)
         self.clip_start = torch.cumsum(self.clip_len, 0) - self.clip_len
-        self.ref = torch.cat([pack["ref"][int(starts[i]) : int(starts[i] + lens[i])] for i in sel]).to(self.device)  # fp16
-        self.terrain = tiles[sel] >= 0
+        self.ref = torch.cat(refs).to(self.device)  # fp16
+        self.terrain = tiles >= 0
         val = np.array([zlib.crc32(base_motion(n).encode()) % val_every == 0 for n in self.clip_names])
         self.is_val = val
         self._sim_root()
-        self.scan = HeightScan(load_terrains(library), GEN_GRID).to(self.device)
+        self.scan = HeightScan(SimpleNamespace(terrains=terrains), GEN_GRID).to(self.device)
         # per (split, kind): clips and the cumulative sampling weight of their windows (valid t0: 0 .. len - F - 1).
-        # Terrain clips: a window weighs (windows of its category)^-terrain_balance (0: every window alike).
-        nwin = (lens[sel] - fut).astype(np.float64)
-        wt = np.ones(len(sel))
+        # Terrain clips: a window weighs (windows of its category)^-terrain_balance (0: every window alike), and each
+        # library's terrain windows together weigh its terrain_share.
+        nwin = (lens - fut).astype(np.float64)
+        wt = np.ones(len(lens))
         if terrain_balance > 0:
             cats = np.array([terrain_category(n) if t else "" for n, t in zip(self.clip_names, self.terrain)])
             for c in set(cats[self.terrain]):
                 m = cats == c
                 wt[m] = nwin[m].sum() ** -terrain_balance
+        if terrain_share is not None:
+            assert len(terrain_share) == len(libs)
+            for li, sh in enumerate(terrain_share):
+                m = self.terrain & (lib_of == li)
+                if m.any():
+                    wt[m] *= sh / (nwin[m] * wt[m]).sum()
         self.pools = {}
         for split in ("train", "val"):
             for kind in ("terrain", "flat"):

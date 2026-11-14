@@ -88,6 +88,11 @@ def load(ckpt: str, device: str):
     return m.eval(), Diffusion(cfg.T, device), ck
 
 
+def first_library(ck) -> str:
+    lib = ck["args"]["library"]
+    return lib[0] if isinstance(lib, (list, tuple)) else lib
+
+
 def standing_frame(lib: str, device: str) -> torch.Tensor:
     """(25,) [root pos, quat, joints] of a standing frame (first frame of a walk start), root at x = y = 0, yaw 0."""
     pack = torch.load(lib, map_location="cpu", weights_only=False, mmap=True)
@@ -224,7 +229,7 @@ def main():
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(a.device)
     S = a.samples
     tiles = torch.arange(len(sc), device=a.device).repeat_interleave(S)
-    st = standing_frame(ck["args"]["library"], a.device)
+    st = standing_frame(first_library(ck), a.device)
     start = st.repeat(len(tiles), 1)
     start[:, 2] += torch.as_tensor(np.array([t.h(np.zeros(2)) for t in terr]), dtype=torch.float32, device=a.device).repeat_interleave(S)
     cmd = torch.as_tensor(np.array([s.cmd for s in sc]), dtype=torch.float32, device=a.device).repeat_interleave(S, 0)

@@ -32,7 +32,9 @@ REPO = Path(__file__).resolve().parents[2]
 @dataclass
 class Args:
     run: str = "gen_v0"
-    library: str = str(REPO / "data/library/dash_flat_terrain_v5_parc_compact.pt")
+    library: list[str] = field(default_factory=lambda: [str(REPO / "data/library/dash_flat_terrain_v5_parc_compact.pt")])
+    terrain_share: list[float] | None = None  # per library: share of the terrain windows (default: by window count)
+    init: str | None = None  # warm start: model + EMA weights (and normaliser) of this checkpoint, fresh optimiser
     model: GenCfg = field(default_factory=GenCfg)
     steps: int = 300_000
     batch: int = 512
@@ -146,7 +148,7 @@ def main(a: Args) -> None:
     torch.manual_seed(a.seed)
     log = REPO / "logs" / a.run
     log.mkdir(parents=True, exist_ok=True)
-    data = GenData(a.library, a.device, hist=a.model.hist, fut=a.model.fut, terrain_balance=a.terrain_balance)
+    data = GenData(a.library, a.device, hist=a.model.hist, fut=a.model.fut, terrain_balance=a.terrain_balance, terrain_share=a.terrain_share)
     print(f"clips {len(data.clip_names)} ({int(data.terrain.sum())} terrain), frames {data.ref.shape[0]:,}; windows train terrain "
           f"{data.num('train', 'terrain'):,} flat {data.num('train', 'flat'):,}, val terrain {data.num('val', 'terrain'):,} flat {data.num('val', 'flat'):,}", flush=True)
     model = Denoiser(a.model).to(a.device)
@@ -159,6 +161,12 @@ def main(a: Args) -> None:
         step = ck["step"]
         ema = copy.deepcopy(model)
         ema.load_state_dict(ck["ema"])
+    elif a.init:
+        ck = torch.load(a.init, map_location=a.device, weights_only=False)
+        model.load_state_dict(ck["model"])
+        ema = copy.deepcopy(model)
+        ema.load_state_dict(ck["ema"])
+        print(f"warm start from {a.init} (step {ck['step']})", flush=True)
     else:
         model.norm.fit(data)
         ema = copy.deepcopy(model)

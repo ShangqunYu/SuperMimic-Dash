@@ -717,6 +717,21 @@ to run the final student.
   (kinematic / loop; the 13 in-data scenes 81 / 104 in the loop at 40k); gen_v2 20k 55 / 68 (flat turning and
   sidestep 0/8: flat share 25%). Renders: terrain boxes drawn in a plain colour (the floor's checker texture hid
   their tops); `logs/gen_eval/gen_v1_40k_loop_render/grid.mp4`.
+- **gen_v1 60k** (heading hold, 8 samples): 62 / 87 of 120; flat now 32/32 but stairs up 4, 0, 0 of 8 (12 of the
+  16 14/18 cm runs reach the top or the last step at 0.1-0.15 m/s, too slow for x > 3 m in 12 s; 3/8 of the 10 cm
+  runs stall at the bottom). Checkpoints swing scene by scene while the learning rate is high. gen_v2 40k 53 / 72
+  (stopped: no flat turning / sidestep, boxes not better).
+- **PARC-style augmentation** `scripts/generator/augment.py gen teacher out.pt [--envs 1024 --rounds 8]`: random
+  terrains per env (stairs up / down: riser 8-19 cm, tread 24-36 cm, 3-8 steps; box 12-32 cm high, 20-50 cm deep,
+  0.6-2 m wide; platform up / down 8-32 cm; 4 cm heightfield, x -1..14 m, y +-1.2 m, 1 m pad), vx 0.3-1.0 m/s with
+  heading hold, 12 s through `closed_loop.run_loop` (generator + teacher in physics; now returns robot velocities
+  too). Kept: past the feature on the right level, no foot > 4 cm in, root 0.35 to 1.1 m (+ drop) above the ground,
+  heading within 30 deg, robot within 0.3 m of the plan. Kept clips are the robot's own motion (sim root / joint
+  velocities) as a packed library + terrains sidecar (names `aug/<family>/<params>_v<cm/s>/<seed>_<round>_<env>`).
+  Test (gen_v1 60k, 128 envs, 47 s): 92 kept (box 23/39, stairs up 20/31, down 17/20, platform up 13/16, down 19/22);
+  kept clips' foot penetration p50 0.9, max 3.7 cm; renders look right.
+- **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
+  library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
   of terrain windows). Run **`gen_v2`** (GPU 0): gen_v1 + `--terrain-frac 0.75 --terrain-balance 0.5` (box
   jump-over 4.0 -> 7.4% of all windows; flat 50 -> 25%), log `logs/gen_v2.out`.
