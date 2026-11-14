@@ -802,6 +802,10 @@ to run the final student.
   > 0.3 rad 32%, sideways > 0.2 m 24%, backwards 8%, standing 25% (scratchpad `cmd_by_family.py`). Runs **gen_v7** (GPU 0,
   init gen_v6 40k) and **gen_v8** (GPU 1, init gen_v5 40k): libraries v5 + aug3a + aug3b, `--terrain-share 0.5 0.2 0.3`,
   `--pen-exact --pen-weight 2`, lr 5e-5, 40k steps (aug1 / aug2 left out).
+  - **First try was launched without `--foot-weight 1.0`** (default 0): the exact penetration term alone lifted every
+    plan ~8 cm on all terrain (root z error at zero noise +7 to +11 cm, kinematic scenes 29-34 / 120; logged loss_foot
+    0.31 vs 0.02 because it is logged unweighted). Discarded (logs `gen_v7.out.foot0`, `gen_v8.out.foot0`);
+    train_generator.py now refuses `--pen-weight` without `--foot-weight`. Relaunched 2026-11-14 ~10:10 with foot 1.0.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%

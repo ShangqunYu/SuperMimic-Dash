@@ -157,6 +157,9 @@ def evaluate(ema: Denoiser, diff: Diffusion, data: GenData, feet: FootMetrics, a
 
 
 def main(a: Args) -> None:
+    # the penetration term alone lifts every foot (gen_v7/v8 first try: plans 8 cm up on all terrain, the foot term logged
+    # at 0.31 but weighted 0); the foot term anchors the soles to the data
+    assert a.pen_weight == 0 or a.foot_weight > 0, "--pen-weight needs --foot-weight > 0"
     torch.manual_seed(a.seed)
     log = REPO / "logs" / a.run
     log.mkdir(parents=True, exist_ok=True)
