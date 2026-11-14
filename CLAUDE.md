@@ -638,6 +638,40 @@ User targets: climb regular US building stairs (IBC commercial: riser <= 7 in / 
 - Not modelled: stair nosing (2-3 cm overhang; a heightfield can't hold it). More box jump-over mocap (standing
   and running approaches) would add the most variety; the box set reuses 10 motions.
 
+## Terrain-aware motion generator (2026-11-14, lab server)
+
+Plan step 2 (user's decision 2026-11-14): a kinematic generator that sees the heightmap (sim only, privileged),
+the v6 teacher tracks its output, and later one depth network on the robot is distilled from generator + teacher
+(DAgger in the sim: the sim renders depth, no world model needed). Command: joystick velocity turned into a
+desired root path (as the motion-matching planner). Dash's computer is an i7 UP Xtreme (CPU only); it only has
+to run the final student.
+- **Data** (`src/supermimic/generator/data.py`, `GenData`, all on the GPU): v5 library, every terrain clip plus flat
+  locomotion (names made only of walk/jog/turn/idle/... words, the motion-matching vocabulary): 34,402 clips, 56.9 h
+  (terrain 5,911 clips, 5.7 h). Window at frame t0: 10 history frames (clamped at the clip start), 60 future
+  frames (1.2 s); frame = root position + rot6d in the canonical frame (origin at the current root, x along its
+  heading, heights relative to it) + 18 joint positions (27-d); heightmap `GEN_GRID` x -0.6..3.0 m, y +-0.8 m,
+  5 cm (73 x 33), terrain height minus current root height; command = the smoothed sim root (25-frame centred
+  mean) 20/40/60 frames ahead, xy + heading (cos, sin) in the canonical frame (12-d). Batches half terrain.
+  Hold-out: motions whose base name hashes to 0 mod 20 (all actor/mirror/terrain variants; holding out terrain ids
+  took 40% of terrain windows, since terrains are shared): val windows terrain 88k, flat 543k.
+- **Model** (`generator/model.py`): transformer denoiser, x0 prediction, cosine schedule T = 1000, DDIM sampling;
+  tokens = [noise level, command, 50 heightmap patches (3 stride-2 convs), history, future], 2 frames per token;
+  d 384, 8 layers, 6 heads, 14.9 M parameters; command dropped 10% (classifier-free guidance possible). Loss: x0
+  MSE + 1.0 x MSE of 10 x frame differences (normalised units). `HeightScan.lookup` (point lookups) was
+  factored out of `HeightScan.forward` for it.
+- **Metrics** (`generator/metrics.py`): foot capsule soles vs the heightfield: penetration, floating in stance,
+  sliding in contact. Mocap reference (val windows): terrain penetration mean 0.37 cm, > 2 cm 2.4% of frames.
+- **Training** `scripts/generator/train_generator.py` (torch.compile, bf16, AdamW 2e-4 cosine, EMA 0.999, batch 512;
+  12 it/s on GPU 0 shared with another user's job). Every 5k steps the EMA model samples 512 val windows (20 DDIM
+  steps) and logs foot quality next to the mocap's. Run **`gen_v0`** (200k steps, ~4.6 h, started 2026-11-14),
+  log `logs/gen_v0.out`, checkpoints `logs/gen_v0/ckpt_*.pt`.
+- **Kinematic test on unseen terrain** `scripts/generator/rollout_generator.py ckpt out [--render]`: procedural
+  stairs up (10/14/18 cm x 6, 28 cm treads) and down, 20/30 cm boxes in the way, 30/50 cm platforms up and down,
+  flat walk / jog / turn / sidestep; constant joystick command (velocity springs to it, half-life 0.3 s), the
+  generator replans every 0.2 s from its own last 10 frames. Success per rollout: no foot > 3 cm into the terrain,
+  contact sliding < 0.4 m/s, root 0.35-0.4 to 1.1 m above the ground, past the obstacle on the right level, speed in
+  range. An untrained model scores 0/30.
+
 ## PARC terrain data (2026-11-08, lab server)
 
 Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SIGGRAPH 2025; MIT):

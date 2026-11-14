@@ -79,16 +79,19 @@ class HeightScan(nn.Module):
         yaw = heading_yaw(s[:, 3:7])
         c, sn = torch.cos(yaw)[:, None], torch.sin(yaw)[:, None]
         ox, oy = self.offsets[None, :, 0], self.offsets[None, :, 1]
-        idx = (tile.reshape(-1).round().long() + 1).clamp(0, self.start.shape[0] - 1)
-        p0, dx, shp = self.p0[idx], self.dx[idx, None], self.shape[idx]
         x = s[:, 0:1] + c * ox - sn * oy  # (n, G)
         y = s[:, 1:2] + sn * ox + c * oy
+        return self.lookup(x, y, tile.reshape(-1)).reshape(*lead, -1)
+
+    def lookup(self, x: torch.Tensor, y: torch.Tensor, tile: torch.Tensor) -> torch.Tensor:
+        """Ground height at terrain-frame points x, y (n, P) of terrains tile (n,) (-1 = flat)."""
+        idx = (tile.round().long() + 1).clamp(0, self.start.shape[0] - 1)
+        p0, dx, shp = self.p0[idx], self.dx[idx, None], self.shape[idx]
         i = torch.round((x - p0[:, 0:1]) / dx).long().clamp(min=0)
         j = torch.round((y - p0[:, 1:2]) / dx).long().clamp(min=0)
         i = torch.minimum(i, shp[:, 0:1] - 1)
         j = torch.minimum(j, shp[:, 1:2] - 1)
-        h = self.heights[self.start[idx, None] + i * shp[:, 1:2] + j]
-        return h.reshape(*lead, -1)
+        return self.heights[self.start[idx, None] + i * shp[:, 1:2] + j]
 
 
 def policy_terrain_obs(scan: HeightScan, s: torch.Tensor, tile: torch.Tensor, noise: bool = False) -> torch.Tensor:
