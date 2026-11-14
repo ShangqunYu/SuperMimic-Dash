@@ -730,6 +730,11 @@ to run the final student.
   velocities) as a packed library + terrains sidecar (names `aug/<family>/<params>_v<cm/s>/<seed>_<round>_<env>`).
   Test (gen_v1 60k, 128 envs, 47 s): 92 kept (box 23/39, stairs up 20/31, down 17/20, platform up 13/16, down 19/22);
   kept clips' foot penetration p50 0.9, max 3.7 cm; renders look right.
+- **Bug fixed (2026-11-14): `load_terrains` is lru-cached by path**, so rebuilding a library at the same path in one
+  process reused the first call's terrains: augmentation rounds 1-7 ran physics on round 0's terrains (kept 2% vs 62%
+  in round 0; that output was deleted). `run_loop` now writes `loop_library_<seed>.pt` and clears the cache.
+- **gen_v1 instability:** train loss bottomed at ~45k (x 0.043) and rose to 0.068 by 80k at lr 1.4-1.7e-4 (val 0.043 ->
+  0.048; scenes 80k 36 / 73 of 120), recovering as the cosine decays (0.051 at 90k). Fine-tunes use a lower lr.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%

@@ -33,7 +33,7 @@ from supermimic.generator.data import GEN_GRID, GRID_SHAPE, from_canonical, to_c
 from supermimic.generator.metrics import FootMetrics  # noqa: E402
 from supermimic.kinematics.rotations import heading_yaw, quat_inv, quat_mul, rotvec_from_quat  # noqa: E402
 from supermimic.terrain.height_scan import HeightScan  # noqa: E402
-from supermimic.terrain.terrains import Terrain, save_terrains, terrains_path  # noqa: E402
+from supermimic.terrain.terrains import Terrain, load_terrains, save_terrains, terrains_path  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 DT = 0.02
@@ -68,8 +68,9 @@ def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: floa
     tracked plan frame R (n, T, 25), robot velocities V (n, T, 6 + NJ) [root lin vel w, root ang vel w, joint vel]."""
     n = len(tiles)
     T = int(seconds * 50)
-    lib = Path(workdir) / "loop_library.pt"
+    lib = Path(workdir) / f"loop_library_{seed}.pt"
     build_library(lib, terr, tiles.tolist(), start, T + 2 * model.cfg.fut)
+    load_terrains.cache_clear()  # cached by path: a rebuilt library must not reuse an earlier call's terrains
     policy, pcfg = load_policy_from_checkpoint(teacher, dev)
     env = make_env(SuperMimicEnvCfgArgs(npz_files=[str(lib)], robot="dash", num_envs=n, compact_library=True, **goal_env_kwargs(pcfg),
                                         episode_length_s=1e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
