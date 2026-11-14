@@ -763,6 +763,11 @@ to run the final student.
   edge. **`--pen-exact`**: soles checked against each terrain's own heightfield (2-4 cm cells; gradient through the sole
   height). On data: clean clips 0.0023 (3 x 3 min 0.0034), soles 6 cm forward (into risers) 0.073 (0.012), 5 cm down
   1.26 (1.16). Run **`gen_v5`** (GPU 1) = gen_v4 + `--pen-exact --pen-weight 2.0`.
+- **gen_v4 40k, 3 seeds: 230 / 360** (20k 249, gen_v1 200k 264): stairs up 10 cm 22/24 (best), but walk + turn left 8/24
+  (5 of 8 seed-0 runs turn *right*, yaw -0.48 for +0.6 commanded) and sidestep 0/24 (0.04-0.18 m/s for 0.4). Forward
+  walking fine. Fine-tuning on the robot's own executed motion weakens command following (it mostly continues its
+  current motion); from a standstill with a turn command the plan follows the robot's first drift. Run **`gen_v6`**
+  (GPU 0) = gen_v1 200k + `--pen-exact --pen-weight 2.0`, mocap only (v5 library), lr 5e-5, 40k: the edge fix alone.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
