@@ -45,6 +45,7 @@ class Args:
     vel_weight: float = 1.0  # loss on frame-to-frame differences (x VEL_GAIN, normalised units)
     foot_weight: float = 0.0  # loss on foot sole positions (FK of the prediction vs the mocap's, / FOOT_SCALE)
     pen_weight: float = 0.0  # penalty on predicted soles more than PEN_SLACK below the heightmap (/ PEN_SCALE)
+    pen_exact: bool = False  # penetration against each terrain's own heightfield instead of the heightmap's 3 x 3 minimum
     terrain_frac: float = 0.5
     terrain_balance: float = 0.0  # terrain windows weighted by (windows of their category)^-this (0.5: sqrt balancing)
     hist_noise: float = 0.0  # std (normalised units) added to the history frames in training
@@ -69,18 +70,29 @@ class GeoLoss:
     """Foot geometry of predicted clean frames in the canonical frame: sole positions vs the mocap's (squared), and
     soles below the heightmap (linear). Weighted per sample by alpha_bar(t): little weight at high noise."""
 
-    def __init__(self, device):
+    def __init__(self, device, scan=None):
+        """scan: the data's HeightScan for exact terrain lookups (each terrain's own heightfield, 2-4 cm cells) instead
+        of the 5 cm heightmap's 3 x 3 minimum, which lets soles cut through stair edges by several cm."""
         self.feet = FootMetrics(None, device)
+        self.scan = scan
 
     def soles(self, f):
         q = quat_from_matrix(rot6d_to_matrix(f[..., 3:9]))
         return self.feet.sole(f[..., :3], q, f[..., 9:])  # (B, F, 2, 2, 3)
 
-    def __call__(self, pred, true, hmap, wt):
+    def __call__(self, pred, true, hmap, wt, origin=None, yaw0=None, tile=None):
         sp = self.soles(pred)
         with torch.no_grad():
             sg = self.soles(true)
         foot = (((sp - sg) / FOOT_SCALE) ** 2).mean((1, 2, 3, 4))
+        if self.scan is not None:
+            B = sp.shape[0]
+            c, s_ = torch.cos(yaw0)[:, None], torch.sin(yaw0)[:, None]
+            px, py = sp[..., 0].reshape(B, -1), sp[..., 1].reshape(B, -1)
+            gx, gy = c * px - s_ * py + origin[:, 0:1], s_ * px + c * py + origin[:, 1:2]
+            h = (self.scan.lookup(gx.detach(), gy.detach(), tile) - origin[:, 2:3]).reshape(sp.shape[:-1])
+            pen = (torch.relu(h - sp[..., 2] - PEN_SLACK) / PEN_SCALE).mean((1, 2, 3))
+            return (wt * foot).mean(), (wt * pen).mean()
         x0, y0 = GEN_GRID.x[0], GEN_GRID.y[0]
         i = ((sp[..., 0] - x0) / GEN_GRID.step).round().long().clamp(0, GRID_SHAPE[0] - 1)
         j = ((sp[..., 1] - y0) / GEN_GRID.step).round().long().clamp(0, GRID_SHAPE[1] - 1)
@@ -111,7 +123,7 @@ def loss_fn(model: Denoiser, diff: Diffusion, w, a: Args, generator=None, geo: G
     lv = Fn.mse_loss(VEL_GAIN * torch.cat([last, x0h], 1).diff(dim=1), VEL_GAIN * torch.cat([last, x0], 1).diff(dim=1))
     if geo is None:
         return lx, lv, t, None, None
-    lf, lp = geo(n.frames_inv(x0h), w.fut, w.hmap, diff.ab[t])
+    lf, lp = geo(n.frames_inv(x0h), w.fut, w.hmap, diff.ab[t], w.origin, w.yaw0, w.tile)
     return lx, lv, t, lf, lp
 
 
@@ -175,7 +187,7 @@ def main(a: Args) -> None:
     diff = Diffusion(a.model.T, a.device)
     feet = FootMetrics(data.scan, a.device)
     train_model = torch.compile(model) if a.compile else model
-    geo = GeoLoss(a.device) if a.foot_weight > 0 or a.pen_weight > 0 else None
+    geo = GeoLoss(a.device, data.scan if a.pen_exact else None) if a.foot_weight > 0 or a.pen_weight > 0 else None
     geo_train = torch.compile(geo.__call__) if geo is not None and a.compile else geo  # FK: 65 -> 6 ms per batch
     writer = SummaryWriter(str(log / "tb"))
 
