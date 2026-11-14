@@ -25,7 +25,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rollout_generator import DX, REPLAN, X0, Y0, command_path, load, scenes, score, standing_frame  # noqa: E402
+from rollout_generator import DX, REPLAN, X0, Y0, command_path, load, operator, scenes, score, standing_frame  # noqa: E402
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env  # noqa: E402
 from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoint  # noqa: E402
@@ -66,7 +66,7 @@ def main():
     ap.add_argument("gen_ckpt")
     ap.add_argument("teacher")
     ap.add_argument("out")
-    ap.add_argument("--samples", type=int, default=4)
+    ap.add_argument("--samples", type=int, default=8)
     ap.add_argument("--seconds", type=float, default=12.0)
     ap.add_argument("--guidance", type=float, default=1.0, help="classifier-free guidance on the command")
     ap.add_argument("--steps", type=int, default=20, help="DDIM steps per plan")
@@ -121,7 +121,7 @@ def main():
                 s49 = torch.zeros(n, 49, device=dev)
                 s49[:, :7] = cur[:, :7]
                 hmap = (scan(s49, tiles) - origin[:, 2:3]).reshape(n, *GRID_SHAPE)
-                c = command_path(buf, cmd_v)
+                c = command_path(buf, operator(buf, cmd_v))
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     x = diff.sample(model, nm.frames(hist), nm.hmap(hmap), nm.cmd(c), torch.ones(n, device=dev), steps=a.steps, guidance=a.guidance, generator=g).float()
                 pos, quat, q = from_canonical(nm.frames_inv(x), origin, yaw0)

@@ -1,5 +1,6 @@
 """Kinematic rollouts of the motion generator (no physics) on procedural terrains it never saw, driven by a
-constant joystick command: stairs up / down at several risers, boxes, platforms, flat walking and turning.
+joystick command: stairs up / down at several risers, boxes, platforms, flat walking and turning. Where the scene
+asks for no turning, the operator steers back to the start heading (``operator``), as a person would.
 
   python scripts/generator/rollout_generator.py ckpt out_dir [--samples 4] [--seconds 8] [--render] [--steps 20]
 
@@ -96,6 +97,19 @@ def standing_frame(lib: str, device: str) -> torch.Tensor:
     return torch.cat([torch.tensor([0.0, 0.0], device=device), f[2:3], q, f[7:25]])
 
 
+HOLD_GAIN, HOLD_MAX = 2.0, 1.0  # heading-holding operator: wz = gain x heading error (rad/s), capped
+
+
+def operator(traj: torch.Tensor, cmd: torch.Tensor) -> torch.Tensor:
+    """The joystick a person would give: the scene's command, but where it asks for no turning the yaw rate steers
+    back to the start heading (yaw 0), as an operator corrects drift. traj (B, T, 25), cmd (B, 3) -> (B, 3)."""
+    out = cmd.clone()
+    hold = cmd[:, 2] == 0
+    yaw = heading_yaw(traj[:, -1, 3:7])
+    out[:, 2] = torch.where(hold, (-HOLD_GAIN * torch.atan2(torch.sin(yaw), torch.cos(yaw))).clamp(-HOLD_MAX, HOLD_MAX), cmd[:, 2])
+    return out
+
+
 def command_path(traj: torch.Tensor, cmd: torch.Tensor) -> torch.Tensor:
     """traj (B, T, 25) rollout so far, cmd (B, 3) -> (B, 12) command features in the current frame: the root
     velocity springs from its recent value to the command (half-life VEL_HALFLIFE), integrated forward."""
@@ -134,7 +148,7 @@ def rollout(model, diff, scan, tiles, start, cmd, seconds, steps, generator=None
         st = torch.zeros(B, 49, device=cur.device)
         st[:, :7] = cur[:, :7]
         hmap = (scan(st, tiles) - origin[:, 2:3]).reshape(B, *GRID_SHAPE)
-        c = command_path(traj, cmd)
+        c = command_path(traj, operator(traj, cmd))
         with torch.autocast("cuda", dtype=torch.bfloat16):
             x = diff.sample(model, n.frames(hist), n.hmap(hmap), n.cmd(c), torch.ones(B, device=cur.device), steps=steps, guidance=guidance, generator=generator).float()
         pos, quat, q = from_canonical(n.frames_inv(x[:, :REPLAN]), origin, yaw0)
@@ -166,6 +180,8 @@ def score(sc, terr, traj, tiles, feet, S):
         dyaw = heading_yaw(tr[:, -1, 3:7]) - heading_yaw(tr[:, half, 3:7])
         yaw_rate = (torch.atan2(torch.sin(dyaw), torch.cos(dyaw)) / span).cpu().numpy()
         speed = np.linalg.norm(v, axis=1)
+        yaw_all = heading_yaw(tr[..., 3:7])
+        yaw_dev = np.degrees(torch.atan2(torch.sin(yaw_all), torch.cos(yaw_all)).abs().amax(1).cpu().numpy())  # from the start heading
         # sliding is reported, not scored: mocap flat walking itself reads ~0.5 m/s here (low swing clearance)
         # floating: root no more than 1.1 m above the ground, plus the drop of a step-down (the body crosses a ledge
         # before it descends)
@@ -182,7 +198,8 @@ def score(sc, terr, traj, tiles, feet, S):
         res[s.name] = {"success": f"{int(ok.sum())}/{S}", **{m: round(v_, 3) for m, v_ in fm.items()}, "max_pen_cm": (pen * 100).round(1).tolist(),
                        "end_x_m": end_x.round(2).tolist(), "end_ground_m": ground[:, -1].round(2).tolist(),
                        "min_root_above_ground_m": above.min(1).round(2).tolist(), "speed_2nd_half_m_s": speed.round(2).tolist(),
-                       "slide_m_s": slide.round(2).tolist(), "yaw_rate_2nd_half": yaw_rate.round(2).tolist()}
+                       "slide_m_s": slide.round(2).tolist(), "yaw_rate_2nd_half": yaw_rate.round(2).tolist(),
+                       "max_heading_dev_deg": yaw_dev.round(0).tolist()}
         print(f"{s.name}: {res[s.name]}", flush=True)
     print(f"success {total}/{len(sc) * S}")
     return res, total
@@ -192,7 +209,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ckpt")
     ap.add_argument("out")
-    ap.add_argument("--samples", type=int, default=4)
+    ap.add_argument("--samples", type=int, default=8)
     ap.add_argument("--seconds", type=float, default=12.0)
     ap.add_argument("--guidance", type=float, default=1.0, help="classifier-free guidance on the command")
     ap.add_argument("--steps", type=int, default=20, help="DDIM steps per plan")

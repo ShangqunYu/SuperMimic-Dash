@@ -704,6 +704,12 @@ to run the final student.
   edges (10-16 cm "penetration" at the riser; the loss's 3 x 3 slack). Terrain windows by skill
   (`terrain_category`): PARC running 25%, stairs 20%, 50 cm box up 19% / down 15% (clips start at the box, slow),
   box jump-over 8%.
+- **Heading drift (gen_v1 40k):** the scene command was a body-frame velocity, so nothing restored the heading: at
+  40k the closed-loop robot turned 100-150 deg away from every drop (and ended behind its start), at 20k it drifted
+  15-70 deg; the kinematic rollouts drifted less. Scenes now use a heading-holding operator (`operator`: where the
+  scene asks for no turning, wz = 2 x heading error, capped at 1 rad/s, as a person would steer) and report the max
+  heading deviation; 8 samples per scene (4 was too noisy: 20k -> 40k moved 44 -> 31 / 60 in the loop while held-out
+  losses kept improving). Old summaries: `logs/gen_eval/*.summary.4samples_noheadinghold`.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
   of terrain windows). Run **`gen_v2`** (GPU 0): gen_v1 + `--terrain-frac 0.75 --terrain-balance 0.5` (box
   jump-over 4.0 -> 7.4% of all windows; flat 50 -> 25%), log `logs/gen_v2.out`.
