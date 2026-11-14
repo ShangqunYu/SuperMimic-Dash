@@ -141,6 +141,48 @@ def rollout(model, diff, scan, tiles, start, cmd, seconds, steps, generator=None
     return traj[:, H - 1 :]
 
 
+def score(sc, terr, traj, tiles, feet, S):
+    """Per scene (S rollouts each, scene-major in traj (B, T, 25)): success and its ingredients."""
+    res = {}
+    total = 0
+    for k, s in enumerate(sc):
+        tr = traj[k * S : (k + 1) * S]
+        tl = tiles[k * S : (k + 1) * S]
+        fm = feet(tr[..., :3], tr[..., 3:7], tr[..., 7:], tl)
+        sole, gap = feet.gap(tr[..., :3], tr[..., 3:7], tr[..., 7:], tl)
+        pen = (-gap).clamp_min(0).amax((1, 2)).cpu().numpy()  # (S,)
+        mid = sole.mean(-2)
+        hs = ((mid[:, 1:, :, :2] - mid[:, :-1, :, :2]).norm(dim=-1) / 0.02)
+        con = (gap[:, 1:] < 0.01).float()
+        slide = ((hs * con).sum((1, 2)) / con.sum((1, 2)).clamp_min(1)).cpu().numpy()  # (S,) m/s, feet in contact
+        ground = np.array([[terr[k].h(p[:2]) for p in row] for row in tr[:, :, :3].cpu().numpy()])  # (S, T)
+        above = tr[:, :, 2].cpu().numpy() - ground
+        end_x = tr[:, -1, 0].cpu().numpy()
+        # mean planar velocity and yaw rate over the second half
+        half = tr.shape[1] // 2
+        span = (tr.shape[1] - 1 - half) * 0.02
+        v = ((tr[:, -1, :2] - tr[:, half, :2]) / span).cpu().numpy()
+        dyaw = heading_yaw(tr[:, -1, 3:7]) - heading_yaw(tr[:, half, 3:7])
+        yaw_rate = (torch.atan2(torch.sin(dyaw), torch.cos(dyaw)) / span).cpu().numpy()
+        speed = np.linalg.norm(v, axis=1)
+        ok = (pen < 0.03) & (above.min(1) > s.min_above) & (above.max(1) < 1.1) & (np.abs(ground[:, -1] - s.top) < 0.02) & (slide < 0.4)
+        ok &= speed < 1.5 * np.hypot(*s.cmd[:2]) + 0.2
+        if s.past is not None:
+            ok &= end_x > s.past
+        else:  # speed within 30 % of the command, turning within 50 %
+            ok &= np.abs(speed - np.hypot(*s.cmd[:2])) < 0.3 * np.hypot(*s.cmd[:2])
+            if s.cmd[2] != 0:
+                ok &= np.abs(yaw_rate - s.cmd[2]) < 0.5 * abs(s.cmd[2])
+        total += int(ok.sum())
+        res[s.name] = {"success": f"{int(ok.sum())}/{S}", **{m: round(v_, 3) for m, v_ in fm.items()}, "max_pen_cm": (pen * 100).round(1).tolist(),
+                       "end_x_m": end_x.round(2).tolist(), "end_ground_m": ground[:, -1].round(2).tolist(),
+                       "min_root_above_ground_m": above.min(1).round(2).tolist(), "speed_2nd_half_m_s": speed.round(2).tolist(),
+                       "slide_m_s": slide.round(2).tolist(), "yaw_rate_2nd_half": yaw_rate.round(2).tolist()}
+        print(f"{s.name}: {res[s.name]}", flush=True)
+    print(f"success {total}/{len(sc) * S}")
+    return res, total
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ckpt")
@@ -166,40 +208,7 @@ def main():
     g = torch.Generator(device=a.device).manual_seed(0)
     traj = rollout(model, diff, scan, tiles, start, cmd, a.seconds, a.steps, generator=g)
     feet = FootMetrics(scan, a.device)
-    res = {}
-    total = 0
-    for k, s in enumerate(sc):
-        tr = traj[k * S : (k + 1) * S]
-        tl = tiles[k * S : (k + 1) * S]
-        fm = feet(tr[..., :3], tr[..., 3:7], tr[..., 7:], tl)
-        sole, gap = feet.gap(tr[..., :3], tr[..., 3:7], tr[..., 7:], tl)
-        pen = (-gap).clamp_min(0).amax((1, 2)).cpu().numpy()  # (S,)
-        mid = sole.mean(-2)
-        hs = ((mid[:, 1:, :, :2] - mid[:, :-1, :, :2]).norm(dim=-1) / 0.02)
-        con = (gap[:, 1:] < 0.01).float()
-        slide = ((hs * con).sum((1, 2)) / con.sum((1, 2)).clamp_min(1)).cpu().numpy()  # (S,) m/s, feet in contact
-        ground = np.array([[terr[k].h(p[:2]) for p in row] for row in tr[:, :, :3].cpu().numpy()])  # (S, T)
-        above = tr[:, :, 2].cpu().numpy() - ground
-        end_x = tr[:, -1, 0].cpu().numpy()
-        # mean planar velocity over the second half, in the start heading frame (x forward), and yaw rate
-        half = tr.shape[1] // 2
-        v = ((tr[:, -1, :2] - tr[:, half, :2]) / ((tr.shape[1] - 1 - half) * 0.02)).cpu().numpy()
-        yaw = torch.atan2(torch.sin(heading_yaw(tr[:, -1, 3:7]) - heading_yaw(tr[:, half, 3:7])), torch.cos(heading_yaw(tr[:, -1, 3:7]) - heading_yaw(tr[:, half, 3:7])))
-        speed = np.linalg.norm(v, axis=1)
-        ok = (pen < 0.03) & (above.min(1) > s.min_above) & (above.max(1) < 1.1) & (np.abs(ground[:, -1] - s.top) < 0.02) & (slide < 0.4)
-        ok &= speed < 1.5 * np.hypot(*s.cmd[:2]) + 0.2
-        if s.past is not None:
-            ok &= end_x > s.past
-        elif s.cmd[2] == 0:  # straight: speed within 30 % of the command
-            ok &= np.abs(speed - np.hypot(*s.cmd[:2])) < 0.3 * np.hypot(*s.cmd[:2])
-        total += int(ok.sum())
-        r = {"success": f"{int(ok.sum())}/{S}", **{m: round(v_, 3) for m, v_ in fm.items()}, "max_pen_cm": (pen * 100).round(1).tolist(),
-             "end_x_m": end_x.round(2).tolist(), "end_ground_m": ground[:, -1].round(2).tolist(),
-             "min_root_above_ground_m": above.min(1).round(2).tolist(), "speed_2nd_half_m_s": speed.round(2).tolist(), "slide_m_s": slide.round(2).tolist(),
-             "yaw_rate_2nd_half": (yaw.cpu().numpy() / ((tr.shape[1] - 1 - half) * 0.02)).round(2).tolist()}
-        res[s.name] = r
-        print(f"{s.name}: {r}", flush=True)
-    print(f"success {total}/{len(sc) * S}")
+    res, total = score(sc, terr, traj, tiles, feet, S)
     (out / "results.json").write_text(json.dumps({"ckpt": a.ckpt, "step": ck["step"], "success": f"{total}/{len(sc) * S}", "scenes": res}, indent=1))
     torch.save({"traj": traj.cpu(), "scenes": [s.name for s in sc], "samples": S}, out / "traj.pt")
     if a.render:

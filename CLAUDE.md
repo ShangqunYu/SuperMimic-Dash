@@ -670,7 +670,12 @@ to run the final student.
   flat walk / jog / turn / sidestep; constant joystick command (velocity springs to it, half-life 0.3 s), the
   generator replans every 0.2 s from its own last 10 frames. Success per rollout: no foot > 3 cm into the terrain,
   contact sliding < 0.4 m/s, root 0.35-0.4 to 1.1 m above the ground, past the obstacle on the right level, speed in
-  range. An untrained model scores 0/30.
+  range (turning within 50% of the commanded yaw rate). An untrained model scores 0/30.
+- **Closed loop** `scripts/generator/closed_loop.py gen_ckpt teacher_ckpt out [--render]`: same scenes in physics; a
+  packed library is written per run (one clip per env on its scene's terrain, sidecar terrains), the generator plans
+  every 0.2 s from the robot's actual last 10 frames and its plan (velocities by differences) overwrites the env
+  reference ahead of the tracked frame (`library._ref`); the teacher tracks it. Scored on the robot's own motion
+  with the same rules; terminations off. ~25 s for 15 scenes on GPU 1.
 
 ## PARC terrain data (2026-11-08, lab server)
 
