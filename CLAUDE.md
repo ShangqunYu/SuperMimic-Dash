@@ -735,6 +735,10 @@ to run the final student.
   in round 0; that output was deleted). `run_loop` now writes `loop_library_<seed>.pt` and clears the cache.
 - **gen_v1 instability:** train loss bottomed at ~45k (x 0.043) and rose to 0.068 by 80k at lr 1.4-1.7e-4 (val 0.043 ->
   0.048; scenes 80k 36 / 73 of 120), recovering as the cosine decays (0.051 at 90k). Fine-tunes use a lower lr.
+- **Augmentation 1** (`data/library/gen_aug/aug1_v1_60k.pt`, gen_v1 60k + v6, 8 x 1024 envs, ~14 min on GPU 0): 5,023
+  clips kept, 16.7 h (box 1,240/2,467, stairs up 994/2,043, stairs down 1,215/1,675, platform up 678/995, down
+  896/1,012). gen_v1 100k: 64 / 88 of 120 (recovered). Run **`gen_v3`** (GPU 0): `--init gen_v1 100k`, libraries v5 +
+  aug1 with `--terrain-share 0.5 0.5`, foot / pen 1.0, lr 5e-5 (warmup 1k), 60k steps; log `logs/gen_v3.out`.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
