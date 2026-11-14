@@ -848,6 +848,17 @@ to run the final student.
   flat segments a pure sidestep (vx within 0.1, |vy| 0.25-0.6 m/s); 0.25 gives 28% of segments (turning 22%).
   **aug5b** = aug4b with `--sidestep 0.25` (seed 15). Runs **gen_v11** (init gen_v6: v5 + aug4a + aug5b, 0.5/0.2/0.3)
   and **gen_v12** (init gen_v6: v5 + aug4a only, 0.6/0.4: is the flat aug needed at all?).
+- **aug5b**: 6,300 clips (flat 3,878/5,735, platform down 1,241/1,254, stairs down 1,181/1,203); pure sidesteps 14.4%
+  of its flat windows (history 0.33 m/s, future 0.38). **gen_v11 / gen_v12 40k, 3 seeds: 297 / 295** (gen_v6 310):
+  sidestep 0 / 0 (0.14-0.22 / 0.11 m/s), platform up 30 cm 24 / 23, turn 24 / 24, platform down 50 cm 14 / 18.
+  gen_v11 guidance 1.25 / 1.5: 298 / 302 (sidestep still 0, drop 50 cm 15 / 19).
+- **The aug models' sidestep, closed loop:** offline replans from the recorded history reproduce the executed plans
+  (scratchpad `probe_check.py`: lateral -0.275 vs -0.273 m/s at 4 s). gen_v11's plans ask for 0.25-0.28 m/s (for 0.4)
+  and the teacher executes 0.12-0.22: each plan starts ~1 cm ahead of the robot and the next plan starts from the robot,
+  so the lag is never made up (gen_v6: plans 0.40-0.45, robot 0.38-0.43). Not the data share (gen_v12 has no flat aug
+  and is slowest), not the operator's heading hold (wz 0 or reversed changes nothing), not the scene edge (lookups
+  clamp: flat). The aug models also yaw 6-9 deg into the sidestep (gen_v6 2-3). Any physics-aug fine-tune so far gains
+  platform up / box / turn and loses the sidestep. **Best generator now: gen_v6 40k at half-life 0.1 (310 / 360).**
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
