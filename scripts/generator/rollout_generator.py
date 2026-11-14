@@ -6,8 +6,9 @@ constant joystick command: stairs up / down at several risers, boxes, platforms,
 Every 0.2 s the generator is sampled from the last 10 frames of the rollout itself, the heightmap at the current
 root and the command path (velocity springs from the current root velocity to the command, half-life 0.3 s),
 and the first 10 frames of its plan are appended. Per scene: foot penetration / floating / sliding, how far
-it got, the ground height reached, the lowest root height above the ground, success (no foot > 3 cm into the terrain, feet in contact sliding < 0.4 m/s
-on average, root 0.35-0.4 to 1.1 m above the ground, past the obstacle on the right level, speed in range), and with --render one video per
+it got, the ground height reached, the lowest root height above the ground, success (no foot > 4 cm into the terrain (mocap on its own terrain: p90 2-3 cm),
+root 0.35-0.4 to 1.1 m above the ground, past the obstacle on the right level, speed in range; foot sliding is
+reported only: mocap flat walking itself reads ~0.5 m/s), and with --render one video per
 scene (first sample) plus all scenes side by side in grid.mp4.
 """
 
@@ -120,7 +121,7 @@ def command_path(traj: torch.Tensor, cmd: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def rollout(model, diff, scan, tiles, start, cmd, seconds, steps, generator=None):
+def rollout(model, diff, scan, tiles, start, cmd, seconds, steps, generator=None, guidance=1.0):
     """tiles (B,), start (B, 25), cmd (B, 3) -> (B, T, 25) frames at 50 Hz (terrain frame)."""
     H, B = model.cfg.hist, start.shape[0]
     n = model.norm
@@ -135,7 +136,7 @@ def rollout(model, diff, scan, tiles, start, cmd, seconds, steps, generator=None
         hmap = (scan(st, tiles) - origin[:, 2:3]).reshape(B, *GRID_SHAPE)
         c = command_path(traj, cmd)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            x = diff.sample(model, n.frames(hist), n.hmap(hmap), n.cmd(c), torch.ones(B, device=cur.device), steps=steps, generator=generator).float()
+            x = diff.sample(model, n.frames(hist), n.hmap(hmap), n.cmd(c), torch.ones(B, device=cur.device), steps=steps, guidance=guidance, generator=generator).float()
         pos, quat, q = from_canonical(n.frames_inv(x[:, :REPLAN]), origin, yaw0)
         traj = torch.cat([traj, torch.cat([pos, quat, q], -1)], 1)
     return traj[:, H - 1 :]
@@ -165,7 +166,8 @@ def score(sc, terr, traj, tiles, feet, S):
         dyaw = heading_yaw(tr[:, -1, 3:7]) - heading_yaw(tr[:, half, 3:7])
         yaw_rate = (torch.atan2(torch.sin(dyaw), torch.cos(dyaw)) / span).cpu().numpy()
         speed = np.linalg.norm(v, axis=1)
-        ok = (pen < 0.03) & (above.min(1) > s.min_above) & (above.max(1) < 1.1) & (np.abs(ground[:, -1] - s.top) < 0.02) & (slide < 0.4)
+        # sliding is reported, not scored: mocap flat walking itself reads ~0.5 m/s here (low swing clearance)
+        ok = (pen < 0.04) & (above.min(1) > s.min_above) & (above.max(1) < 1.1) & (np.abs(ground[:, -1] - s.top) < 0.02)
         ok &= speed < 1.5 * np.hypot(*s.cmd[:2]) + 0.2
         if s.past is not None:
             ok &= end_x > s.past
@@ -188,7 +190,8 @@ def main():
     ap.add_argument("ckpt")
     ap.add_argument("out")
     ap.add_argument("--samples", type=int, default=4)
-    ap.add_argument("--seconds", type=float, default=8.0)
+    ap.add_argument("--seconds", type=float, default=12.0)
+    ap.add_argument("--guidance", type=float, default=1.0, help="classifier-free guidance on the command")
     ap.add_argument("--steps", type=int, default=20, help="DDIM steps per plan")
     ap.add_argument("--render", action="store_true")
     ap.add_argument("--device", default="cuda:0")
@@ -206,10 +209,10 @@ def main():
     start[:, 2] += torch.as_tensor(np.array([t.h(np.zeros(2)) for t in terr]), dtype=torch.float32, device=a.device).repeat_interleave(S)
     cmd = torch.as_tensor(np.array([s.cmd for s in sc]), dtype=torch.float32, device=a.device).repeat_interleave(S, 0)
     g = torch.Generator(device=a.device).manual_seed(0)
-    traj = rollout(model, diff, scan, tiles, start, cmd, a.seconds, a.steps, generator=g)
+    traj = rollout(model, diff, scan, tiles, start, cmd, a.seconds, a.steps, generator=g, guidance=a.guidance)
     feet = FootMetrics(scan, a.device)
     res, total = score(sc, terr, traj, tiles, feet, S)
-    (out / "results.json").write_text(json.dumps({"ckpt": a.ckpt, "step": ck["step"], "success": f"{total}/{len(sc) * S}", "scenes": res}, indent=1))
+    (out / "results.json").write_text(json.dumps({"ckpt": a.ckpt, "step": ck["step"], "guidance": a.guidance, "success": f"{total}/{len(sc) * S}", "scenes": res}, indent=1))
     torch.save({"traj": traj.cpu(), "scenes": [s.name for s in sc], "samples": S}, out / "traj.pt")
     if a.render:
         render_all(sc, terr, traj[::S].cpu().numpy(), out)

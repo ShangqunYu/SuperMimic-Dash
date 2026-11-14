@@ -675,7 +675,26 @@ to run the final student.
   packed library is written per run (one clip per env on its scene's terrain, sidecar terrains), the generator plans
   every 0.2 s from the robot's actual last 10 frames and its plan (velocities by differences) overwrites the env
   reference ahead of the tracked frame (`library._ref`); the teacher tracks it. Scored on the robot's own motion
-  with the same rules; terminations off. ~25 s for 15 scenes on GPU 1.
+  with the same rules; terminations off. ~25 s for 15 scenes on GPU 1. Both take `--guidance` (classifier-free on
+  the command) and default to 12 s scenes. `scripts/generator/eval_checkpoints.sh RUN` runs both on every 20k
+  checkpoint as it appears (summary `logs/gen_eval/RUN.summary`).
+- **Success rules calibrated on mocap** (scratchpad `calib*.py`): mocap on its own terrain has max foot penetration
+  p90 2-3 cm (US stairs, come up 50 cm), so the limit is 4 cm; human stair / platform clips move at 0.15-0.26 m/s,
+  so scenes run 12 s; "sliding" (horizontal speed of a sole point within 1 cm of the ground) reads ~0.5 m/s on mocap
+  flat walking itself (low swing clearance; heel-toe roll) and is only reported, not scored.
+- **gen_v0 at 20k** (val: terrain penetration mean 1.2 cm, mocap 0.37): scenes 5/60 kinematic, 11/60 closed loop
+  (8 s rules: boxes 7/8 and 30 cm platform up 3/4 in the loop, the teacher stepping where the plan walks through).
+  Guidance 2 / 3: 9 / 0 of 60 (heading drifts; worse). Library windows with true inputs (scratchpad `indist.py`):
+  the heightmap is used for level changes (stairs / 50 cm come-up: plans climb the right height; a flat map gives
+  flat plans), but 28-30% of plans put a foot > 4 cm into the terrain (mocap 0%), and on the US box jumps a flat
+  map changes nothing (plans walk into the box: p90 17.5 cm). Joint-space MSE does not pin the feet to the terrain.
+- **Foot geometry losses** (`--foot-weight`, `--pen-weight`, `GeoLoss` in train_generator.py, off by default):
+  differentiable FK of the predicted clean frames in the canonical frame; sole positions vs the mocap's
+  (squared, / 0.1 m) and soles more than 1 cm below the heightmap (linear, / 2 cm; lowest of the 3 x 3 cells around,
+  since a nearest-cell lookup next to a step reads the step and mocap feet stand there), each weighted by
+  alpha_bar(t). Checks: mocap vs itself 0 / 0.005, mocap + 2 cm noise 0.06 / 0.12, 5 cm down pen 1.2. Compiled
+  6 ms per batch (eager 65 ms; first compile ~3 min). Run **`gen_v1`** (GPU 1, from scratch, weights 1.0 / 1.0, else
+  as gen_v0), log `logs/gen_v1.out`.
 
 ## PARC terrain data (2026-11-08, lab server)
 

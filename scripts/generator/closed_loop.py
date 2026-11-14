@@ -67,7 +67,8 @@ def main():
     ap.add_argument("teacher")
     ap.add_argument("out")
     ap.add_argument("--samples", type=int, default=4)
-    ap.add_argument("--seconds", type=float, default=8.0)
+    ap.add_argument("--seconds", type=float, default=12.0)
+    ap.add_argument("--guidance", type=float, default=1.0, help="classifier-free guidance on the command")
     ap.add_argument("--steps", type=int, default=20, help="DDIM steps per plan")
     ap.add_argument("--render", action="store_true")
     ap.add_argument("--device", default="cuda:0")
@@ -122,7 +123,7 @@ def main():
                 hmap = (scan(s49, tiles) - origin[:, 2:3]).reshape(n, *GRID_SHAPE)
                 c = command_path(buf, cmd_v)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    x = diff.sample(model, nm.frames(hist), nm.hmap(hmap), nm.cmd(c), torch.ones(n, device=dev), steps=a.steps, generator=g).float()
+                    x = diff.sample(model, nm.frames(hist), nm.hmap(hmap), nm.cmd(c), torch.ones(n, device=dev), steps=a.steps, guidance=a.guidance, generator=g).float()
                 pos, quat, q = from_canonical(nm.frames_inv(x), origin, yaw0)
                 frames = with_velocities(cur, torch.cat([pos, quat, q], -1))
                 idx = cmd.frame[:, None] + torch.arange(1, frames.shape[1] + 1, device=dev)
@@ -139,7 +140,7 @@ def main():
     off = (Q[..., :2] - R[..., :2]).norm(dim=-1)
     for k, s in enumerate(sc):
         res[s.name]["robot_vs_plan_xy_max_m"] = off[k * S : (k + 1) * S].amax(1).cpu().numpy().round(2).tolist()
-    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "step": ck["step"], "success": f"{total}/{n}", "scenes": res}, indent=1))
+    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "step": ck["step"], "guidance": a.guidance, "success": f"{total}/{n}", "scenes": res}, indent=1))
     torch.save({"robot": Q.cpu(), "plan": R.cpu(), "scenes": [s.name for s in sc], "samples": S}, out / "traj.pt")
     if a.render:
         render_all(sc, terr, Q[::S].cpu().numpy(), R[::S].cpu().numpy(), out)
