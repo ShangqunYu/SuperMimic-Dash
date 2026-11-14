@@ -2,7 +2,7 @@
 and the runs that succeed are kept as new reference clips (the robot's own motion, physically feasible for Dash).
 
   python scripts/generator/augment.py gen_ckpt teacher_ckpt out.pt [--envs 1024] [--rounds 4] [--seconds 12] [--seed 0]
-      [--vary] [--families flat=0.4,stairs_up=0.2,...] [--halflife 0.1] [--follow-tol 0.67]
+      [--vary] [--families flat=0.4,stairs_up=0.2,...] [--halflife 0.1] [--follow-tol 0.67] [--sidestep 0.25]
 
 Terrain families (each env its own terrain, all along +x, the robot starts at x = 0 facing +x): stairs up / down
 (riser 8-19 cm, tread 24-36 cm, 3-8 steps), a box in the way (12-32 cm high, 20-50 cm deep, 0.6-2 m wide), a
@@ -92,11 +92,12 @@ def sample_scene(rng: np.random.Generator):
     return fam, par, ter, float(ter.h(np.zeros(2))), float(ter.h(np.array([X.max() - 0.1, 0.0]))), past, (vx, vy, wz)
 
 
-def command_schedule(rng: np.random.Generator, fam: str, steps: int) -> np.ndarray:
+def command_schedule(rng: np.random.Generator, fam: str, steps: int, side: float = 0.0) -> np.ndarray:
     """--vary: a joystick that changes every 2-4 s -> (steps, 4) vx, vy, wz (0: steer to the target heading), target
     heading. Terrain: vx 0.3-1.0 m/s; after the first segment, a third with vy up to 0.3 m/s and half aiming up to 20 deg
-    off the course. Flat: stand 15%; else any walking command (60% with vy up to 0.5 m/s), 30% turning at a set rate (the target then
-    moves on by the turn), else half of the time steering to a new heading up to 90 deg away."""
+    off the course. Flat: stand 15%, a pure sidestep (vx within 0.1, |vy| 0.25-0.6 m/s) `side`; else any walking command (60%
+    with vy up to 0.5 m/s), 30 / 85 of them turning at a set rate (the target then moves on by the turn), else half of the time
+    steering to a new heading up to 90 deg away."""
     out = np.zeros((steps, 4), np.float32)
     t, tgt = 0, 0.0
     while t < steps:
@@ -104,9 +105,11 @@ def command_schedule(rng: np.random.Generator, fam: str, steps: int) -> np.ndarr
         vx = vy = wz = 0.0
         if fam == "flat":
             r = rng.random()
-            if r >= 0.15:
+            if 0.15 <= r < 0.15 + side:
+                vx, vy = rng.uniform(-0.1, 0.1), float(rng.choice([-1.0, 1.0]) * rng.uniform(0.25, 0.6))
+            elif r >= 0.15 + side:
                 vx, vy = rng.uniform(-0.4, 1.2), (rng.uniform(-0.5, 0.5) if rng.random() < 0.6 else 0.0)
-                if r < 0.45:
+                if (r - 0.15 - side) / (0.85 - side) < 0.3 / 0.85:
                     wz = float(rng.choice([-1.0, 1.0]) * rng.uniform(0.3, 0.8))
                 elif rng.random() < 0.5:
                     tgt += rng.uniform(-np.pi / 2, np.pi / 2)
@@ -191,6 +194,7 @@ def main():
     ap.add_argument("--families", default=None, help="family weights, e.g. flat=0.4,stairs_up=0.3 (others 0)")
     ap.add_argument("--halflife", type=float, default=VEL_HALFLIFE, help="s, the command path's velocity spring (closed_loop.run_loop)")
     ap.add_argument("--follow-tol", type=float, default=1.0, help="scales the flat --vary command-following tolerances (follows)")
+    ap.add_argument("--sidestep", type=float, default=0.0, help="flat --vary: share of segments that are pure sidesteps (command_schedule)")
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
     if a.families:
@@ -215,7 +219,7 @@ def main():
         start[:, 2] += torch.tensor([s[3] for s in sc], device=dev)
         T = int(a.seconds * 50)
         if a.vary:
-            sched = np.stack([command_schedule(rng, s[0], T) for s in sc])
+            sched = np.stack([command_schedule(rng, s[0], T, a.sidestep) for s in sc])
         else:
             sched = np.zeros((a.envs, T, 4), np.float32)
             sched[..., :3] = np.array([list(s[6]) for s in sc], np.float32)[:, None]
@@ -237,7 +241,7 @@ def main():
     torch.save({"ref": torch.cat(refs).half(), "names": names, "starts": starts, "lengths": lens, "robot": "dash",
                 "clip_tile": list(range(len(names))), "terrain_names": names}, out)
     save_terrains(terrains_path(out), names, terrains)
-    out.with_suffix(".json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "seconds": a.seconds, "vary": a.vary, "halflife": a.halflife, "follow_tol": a.follow_tol, "families": FAMILIES,
+    out.with_suffix(".json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "seconds": a.seconds, "vary": a.vary, "halflife": a.halflife, "follow_tol": a.follow_tol, "sidestep": a.sidestep, "families": FAMILIES,
                                                     "kept": {k: f"{v[0]}/{v[1]}" for k, v in sorted(stats.items())}, "clips": len(names)}, indent=1))
     work.rmdir()
     print(f"{len(names)} clips ({sum(lens) / 50 / 3600:.2f} h) -> {out}")

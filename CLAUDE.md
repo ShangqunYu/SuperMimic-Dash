@@ -835,7 +835,19 @@ to run the final student.
   gen_v7 sidesteps at 0.15 m/s for 0.4 even at 0.05 (the aug3b sidesteps were slow: v6 at 0.3, `follows` passes
   0.16 m/s for 0.4). platform up 50 cm: 0 for every model. **aug4a** (gen_v7 40k, terrain families as aug3a, seed 13)
   and **aug4b** (gen_v6 40k, families as aug3b, seed 14): `--vary --halflife 0.1 --follow-tol 0.67` (flat segments
-  within 0.08 + 20% sideways), 8 x 1024 envs.
+  within 0.08 + 20% sideways), 8 x 1024 envs. aug4a 7,086 clips (box 1,974/2,425, platform up 1,168/1,200, stairs
+  down 1,629/1,728, stairs up 2,315/2,839); aug4b 6,116 (flat 3,747/5,790, platform down 1,155/1,173, stairs down
+  1,214/1,229). Runs **gen_v9** (init gen_v6 40k) / **gen_v10** (init gen_v7 40k): v5 + aug4a + aug4b, 0.5/0.2/0.3,
+  as gen_v7. **40k, 3 seeds (half-life 0.1): 299 / 296** (gen_v6 310): turn 24 / 24, platform up 30 cm 21 / 22, stairs
+  23-22-22, but **sidestep 0 / 0** again and platform down 50 cm 20 / 18.
+- **Why every aug fine-tune loses the sidestep:** gen_v9 starts at 0.3 m/s, then its own plans slow to 0.13-0.17 m/s
+  within ~4 s and the robot tracks them within 1 cm (gen_v6: plans 0.40-0.45, robot 0.38-0.43); kinematically gen_v9
+  sidesteps at 0.43. Pure sidestep windows (lateral >= 0.3 m at 1.2 s, forward < 0.15 m; scratchpad
+  `side_windows.py`): mocap flat 5.9% (history 0.49 m/s, future 0.61), aug4b flat 2.0% (0.26 / 0.35), aug3b 0.8%:
+  with physics-looking history a fast sustained sidestep is almost unseen. **`augment.py --sidestep S`**: that share of
+  flat segments a pure sidestep (vx within 0.1, |vy| 0.25-0.6 m/s); 0.25 gives 28% of segments (turning 22%).
+  **aug5b** = aug4b with `--sidestep 0.25` (seed 15). Runs **gen_v11** (init gen_v6: v5 + aug4a + aug5b, 0.5/0.2/0.3)
+  and **gen_v12** (init gen_v6: v5 + aug4a only, 0.6/0.4: is the flat aug needed at all?).
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
