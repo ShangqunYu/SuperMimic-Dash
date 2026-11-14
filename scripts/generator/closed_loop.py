@@ -156,6 +156,10 @@ def render_all(sc, terr, Q, R, out: Path, w=640, h=360):
     for k, s in enumerate(sc):
         boxes = np.array([[0, 0, terr[k].floor - 0.05, 0.01, 0.01, 0.05]] + [list(b) for b in terr[k].boxes()])
         m = dash_model(boxes, w, h)
+        for g in range(m.ngeom):  # terrain in a plain colour: with the floor's checker texture, tops vanish into it
+            if m.geom(g).name.startswith("terrain_"):
+                m.geom_matid[g] = -1
+                m.geom_rgba[g] = (0.60, 0.66, 0.78, 1.0)
         q, r = resample(Q[k].astype(np.float64), 50, 1.0), resample(R[k].astype(np.float64), 50, 1.0)
         p = out / f"{k:02d}.mp4"
         encode(str(p), render(m, q, r, w, h, [s.name]), w, h)

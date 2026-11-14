@@ -710,6 +710,13 @@ to run the final student.
   scene asks for no turning, wz = 2 x heading error, capped at 1 rad/s, as a person would steer) and report the max
   heading deviation; 8 samples per scene (4 was too noisy: 20k -> 40k moved 44 -> 31 / 60 in the loop while held-out
   losses kept improving). Old summaries: `logs/gen_eval/*.summary.4samples_noheadinghold`.
+- **The "50 cm box" clips are on a 30 cm box** (scaled to Dash in retargeting; the names keep the human height):
+  come_up / come_down / jump_on relief 0.30 m, US box jumps 0.25-0.31 m. The 50 cm platform scenes are beyond the
+  data: gen_v1 40k fails the climb at 0.15 / 0.3 / 0.6 m/s and from 0.3 m away (the 30 cm control 8/8;
+  scratchpad `speed_probe.py`). With heading hold and 8 samples: gen_v1 20k 63 / 84, 40k 69 / 86 of 120
+  (kinematic / loop; the 13 in-data scenes 81 / 104 in the loop at 40k); gen_v2 20k 55 / 68 (flat turning and
+  sidestep 0/8: flat share 25%). Renders: terrain boxes drawn in a plain colour (the floor's checker texture hid
+  their tops); `logs/gen_eval/gen_v1_40k_loop_render/grid.mp4`.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
   of terrain windows). Run **`gen_v2`** (GPU 0): gen_v1 + `--terrain-frac 0.75 --terrain-balance 0.5` (box
   jump-over 4.0 -> 7.4% of all windows; flat 50 -> 25%), log `logs/gen_v2.out`.
