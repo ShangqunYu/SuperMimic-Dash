@@ -57,6 +57,22 @@ def is_locomotion(name: str) -> bool:
     return base is not None and set(re.findall(r"[a-z]+", base)) <= LOCO_WORDS
 
 
+def terrain_category(name: str) -> str:
+    """Skill of a terrain clip, for balanced sampling: stairs, box jump-over, 50 cm box up / down, PARC type, other."""
+    n = name.lower()
+    if n.startswith("parc/"):
+        return "stairs" if "stairs" in n else "parc_" + next((k for k in ("boxes", "running", "teaser", "platform") if k in n), "other")
+    if "stairs" in n or "_us_r" in n:
+        return "stairs"
+    if re.search(r"_h\d+_d\d+_w\d+$", n) or "jump_over_obstacle" in n or "avoid_obstacle" in n:
+        return "box_jump_over"
+    if "come_up" in n or "jump_on" in n:
+        return "box_up"
+    if "come_down" in n or "jump_off" in n:
+        return "box_down"
+    return "other"
+
+
 def base_motion(name: str) -> str:
     """Clip name without actor / mirror suffix (BONES-SEED) or augmentation suffix (PARC)."""
     if name.startswith("parc/"):
@@ -108,7 +124,8 @@ class Window:
 
 
 class GenData:
-    def __init__(self, library: str | Path, device: str = "cuda:0", hist: int = 10, fut: int = 60, val_every: int = 20, nj: int = 18):
+    def __init__(self, library: str | Path, device: str = "cuda:0", hist: int = 10, fut: int = 60, val_every: int = 20, nj: int = 18,
+                 terrain_balance: float = 0.0):
         self.device = torch.device(device)
         self.H, self.F, self.nj = hist, fut, nj
         pack = torch.load(library, map_location="cpu", weights_only=False, mmap=True)
@@ -125,13 +142,22 @@ class GenData:
         self.is_val = val
         self._sim_root()
         self.scan = HeightScan(load_terrains(library), GEN_GRID).to(self.device)
-        # per (split, kind): clips and cumulative counts of valid t0 (0 .. len - F - 1)
+        # per (split, kind): clips and the cumulative sampling weight of their windows (valid t0: 0 .. len - F - 1).
+        # Terrain clips: a window weighs (windows of its category)^-terrain_balance (0: every window alike).
+        nwin = (lens[sel] - fut).astype(np.float64)
+        wt = np.ones(len(sel))
+        if terrain_balance > 0:
+            cats = np.array([terrain_category(n) if t else "" for n, t in zip(self.clip_names, self.terrain)])
+            for c in set(cats[self.terrain]):
+                m = cats == c
+                wt[m] = nwin[m].sum() ** -terrain_balance
         self.pools = {}
         for split in ("train", "val"):
             for kind in ("terrain", "flat"):
                 m = (val if split == "val" else ~val) & (self.terrain if kind == "terrain" else ~self.terrain)
-                ids = torch.as_tensor(np.nonzero(m)[0], device=self.device)
-                self.pools[(split, kind)] = (ids, torch.cumsum(self.clip_len[ids] - fut, 0))
+                ids = np.nonzero(m)[0]
+                self.pools[(split, kind)] = (torch.as_tensor(ids, device=self.device), torch.as_tensor(np.cumsum(nwin[ids] * wt[ids]), device=self.device),
+                                             int(nwin[ids].sum()))
 
     def _sim_root(self) -> None:
         """Smoothed planar root (xy, unwrapped yaw) per frame, each clip separately (edges hold their value)."""
@@ -156,19 +182,19 @@ class GenData:
         self.sxy, self.syaw = (xy / ROOT_WINDOW).float(), (yw / ROOT_WINDOW).float()
 
     def num(self, split: str, kind: str) -> int:
-        return int(self.pools[(split, kind)][1][-1]) if len(self.pools[(split, kind)][0]) else 0
+        return self.pools[(split, kind)][2]
 
     def sample(self, n: int, split: str = "train", terrain_frac: float = 0.5, generator: torch.Generator | None = None) -> Window:
         k = int(round(n * terrain_frac))
         clips, t0s = [], []
         for kind, m in (("terrain", k), ("flat", n - k)):
-            ids, cum = self.pools[(split, kind)]
+            ids, cum, _ = self.pools[(split, kind)]
             if m == 0:
                 continue
-            u = torch.randint(int(cum[-1]), (m,), device=self.device, generator=generator)
-            c = torch.searchsorted(cum, u, right=True)
-            clips.append(ids[c])
-            t0s.append(u - (cum[c] - (self.clip_len[ids[c]] - self.F)))
+            u = torch.rand(m, device=self.device, generator=generator, dtype=torch.float64) * cum[-1]
+            c = ids[torch.searchsorted(cum, u, right=True).clamp(max=len(ids) - 1)]
+            clips.append(c)
+            t0s.append((torch.rand(m, device=self.device, generator=generator) * (self.clip_len[c] - self.F)).long().clamp(max=self.clip_len[c] - self.F - 1))
         return self.window(torch.cat(clips), torch.cat(t0s))
 
     def window(self, clip: torch.Tensor, t0: torch.Tensor) -> Window:

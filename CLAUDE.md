@@ -695,6 +695,18 @@ to run the final student.
   alpha_bar(t). Checks: mocap vs itself 0 / 0.005, mocap + 2 cm noise 0.06 / 0.12, 5 cm down pen 1.2. Compiled
   6 ms per batch (eager 65 ms; first compile ~3 min). Run **`gen_v1`** (GPU 1, from scratch, weights 1.0 / 1.0, else
   as gen_v0), log `logs/gen_v1.out`.
+- **Scene results** (12 s, rules above; the floating limit adds the drop of a step-down, since the body crosses a
+  ledge before it descends), kinematic / closed loop with v6: gen_v0 20k 5 / 16, 40k 12 / 15 (stopped at 40k);
+  **gen_v1 20k 32 / 44** of 60 (held-out terrain penetration mean 0.09 cm vs gen_v0 40k 1.04, mocap 0.37). gen_v1 20k
+  in the loop: flat 14/16, stairs up 10 / 14 cm 8/8 (18 cm: reaches 0.9-1.08 m of 1.08 but too slowly), stairs down
+  6/8, platform 30 cm up + down 8/8, box 20 cm 4/4, box 30 cm 1/4 (falls), platform up 50 cm 0/4 (stops at the
+  wall), platform down 50 cm 3/4. Kinematic plans still walk through the boxes and the 50 cm wall, and clip stair
+  edges (10-16 cm "penetration" at the riser; the loss's 3 x 3 slack). Terrain windows by skill
+  (`terrain_category`): PARC running 25%, stairs 20%, 50 cm box up 19% / down 15% (clips start at the box, slow),
+  box jump-over 8%.
+- **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
+  of terrain windows). Run **`gen_v2`** (GPU 0): gen_v1 + `--terrain-frac 0.75 --terrain-balance 0.5` (box
+  jump-over 4.0 -> 7.4% of all windows; flat 50 -> 25%), log `logs/gen_v2.out`.
 
 ## PARC terrain data (2026-11-08, lab server)
 

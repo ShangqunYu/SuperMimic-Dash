@@ -44,6 +44,7 @@ class Args:
     foot_weight: float = 0.0  # loss on foot sole positions (FK of the prediction vs the mocap's, / FOOT_SCALE)
     pen_weight: float = 0.0  # penalty on predicted soles more than PEN_SLACK below the heightmap (/ PEN_SCALE)
     terrain_frac: float = 0.5
+    terrain_balance: float = 0.0  # terrain windows weighted by (windows of their category)^-this (0.5: sqrt balancing)
     hist_noise: float = 0.0  # std (normalised units) added to the history frames in training
     ema: float = 0.999
     log_every: int = 200
@@ -145,7 +146,7 @@ def main(a: Args) -> None:
     torch.manual_seed(a.seed)
     log = REPO / "logs" / a.run
     log.mkdir(parents=True, exist_ok=True)
-    data = GenData(a.library, a.device, hist=a.model.hist, fut=a.model.fut)
+    data = GenData(a.library, a.device, hist=a.model.hist, fut=a.model.fut, terrain_balance=a.terrain_balance)
     print(f"clips {len(data.clip_names)} ({int(data.terrain.sum())} terrain), frames {data.ref.shape[0]:,}; windows train terrain "
           f"{data.num('train', 'terrain'):,} flat {data.num('train', 'flat'):,}, val terrain {data.num('val', 'terrain'):,} flat {data.num('val', 'flat'):,}", flush=True)
     model = Denoiser(a.model).to(a.device)

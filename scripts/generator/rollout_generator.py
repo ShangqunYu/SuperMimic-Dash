@@ -167,7 +167,10 @@ def score(sc, terr, traj, tiles, feet, S):
         yaw_rate = (torch.atan2(torch.sin(dyaw), torch.cos(dyaw)) / span).cpu().numpy()
         speed = np.linalg.norm(v, axis=1)
         # sliding is reported, not scored: mocap flat walking itself reads ~0.5 m/s here (low swing clearance)
-        ok = (pen < 0.04) & (above.min(1) > s.min_above) & (above.max(1) < 1.1) & (np.abs(ground[:, -1] - s.top) < 0.02)
+        # floating: root no more than 1.1 m above the ground, plus the drop of a step-down (the body crosses a ledge
+        # before it descends)
+        drop = max(0.0, float(terr[k].h(np.zeros(2))) - s.top)
+        ok = (pen < 0.04) & (above.min(1) > s.min_above) & (above.max(1) < 1.1 + drop) & (np.abs(ground[:, -1] - s.top) < 0.02)
         ok &= speed < 1.5 * np.hypot(*s.cmd[:2]) + 0.2
         if s.past is not None:
             ok &= end_x > s.past
