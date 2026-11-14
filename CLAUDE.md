@@ -739,6 +739,15 @@ to run the final student.
   clips kept, 16.7 h (box 1,240/2,467, stairs up 994/2,043, stairs down 1,215/1,675, platform up 678/995, down
   896/1,012). gen_v1 100k: 64 / 88 of 120 (recovered). Run **`gen_v3`** (GPU 0): `--init gen_v1 100k`, libraries v5 +
   aug1 with `--terrain-share 0.5 0.5`, foot / pen 1.0, lr 5e-5 (warmup 1k), 60k steps; log `logs/gen_v3.out`.
+- **Final gen_v1 200k: 69 / 83 of 120** (kinematic / loop; reached level on stairs up 10/14/18 cm: 6, 5, 1 of 8). gen_v1
+  loop by checkpoint: 84, 86, 87, 73, 88, 82, 77, 78, 82, 83 (20k ... 200k). **gen_v3 (aug1 fine-tune) 60k: 69 / 64**:
+  box 30 cm and platform 30 cm up 8/8, but stairs up reached 1, 0, 1 of 8, stairs down 10 cm 3/8, sidestep 0/8.
+  Cause: every aug1 clip starts from the same settled standing pose (env reset) with the teacher lagging the first
+  plans; from that pose in the loop, gen_v3 creeps (stairs: 0.44-0.67 m in 3 s vs gen_v1 0.8-1.1 m), or stands still
+  (sidestep; half the stairs-down runs). The kinematic test (library standing frame) does not show it. Fix:
+  `augment.py --trim 1.0` (first second of each kept clip cut) and `scripts/generator/trim_library.py` for aug1
+  (`aug1_v1_60k_trim1s.pt`, 15.35 h). Augmentation 2 (`aug2_v1_200k.pt`, gen_v1 200k, seed 1, flat family and vy):
+  running.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%

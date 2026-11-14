@@ -9,7 +9,9 @@ platform up / down (8-32 cm), flat ground, on a 4 cm heightfield 15 m long; terr
 with vy up to 0.3 m/s), flat runs any walking command (half turning); heading held by the operator where not turning
 (rollout_generator.operator).
 Kept: past the feature on the right level (flat: anywhere), no foot > 4 cm into the terrain, root 0.35 to 1.1 m (+ any drop) above
-the ground, heading within 30 deg (unless turning), robot within 0.3 m of the plan throughout. Writes a packed library (out.pt,
+the ground, heading within 30 deg (unless turning), robot within 0.3 m of the plan throughout. The first --trim s
+(1.0) are cut: every run starts from the same settled standing pose with the teacher lagging the first plans, and
+5,000 copies of that start taught gen_v3 to hesitate from a standstill. Writes a packed library (out.pt,
 names aug/<family>/<params>/<round>_<env>) with its terrains (out.terrains.npz) and out.json (kept per family).
 """
 
@@ -110,6 +112,7 @@ def main():
     ap.add_argument("--rounds", type=int, default=4)
     ap.add_argument("--seconds", type=float, default=12.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--trim", type=float, default=1.0, help="s cut from the start of each kept clip (the settled standing start, the teacher lagging the first plans)")
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
     dev = a.device
@@ -136,7 +139,7 @@ def main():
             stats[s[0]][1] += 1
             if ok[e]:
                 names.append(f"aug/{s[0]}/{s[1]}_v{s[6][0] * 100:.0f}_{s[6][1] * 100:.0f}_{s[6][2] * 100:.0f}/{a.seed}_{rd}_{e}")
-                refs.append(torch.cat([Q[e], V[e]], -1).cpu())
+                refs.append(torch.cat([Q[e], V[e]], -1)[int(a.trim * 50) :].cpu())
                 terrains.append(s[2].padded(1.0))
         print(f"round {rd}: kept {int(ok.sum())}/{a.envs}; so far " + ", ".join(f"{k} {v[0]}/{v[1]}" for k, v in sorted(stats.items())), flush=True)
     lens = [len(r) for r in refs]
