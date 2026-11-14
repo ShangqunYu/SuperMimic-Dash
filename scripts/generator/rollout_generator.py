@@ -204,7 +204,8 @@ def score(sc, terr, traj, tiles, feet, S):
                        "end_x_m": end_x.round(2).tolist(), "end_ground_m": ground[:, -1].round(2).tolist(),
                        "min_root_above_ground_m": above.min(1).round(2).tolist(), "speed_2nd_half_m_s": speed.round(2).tolist(),
                        "slide_m_s": slide.round(2).tolist(), "yaw_rate_2nd_half": yaw_rate.round(2).tolist(),
-                       "max_heading_dev_deg": yaw_dev.round(0).tolist()}
+                       "max_heading_dev_deg": yaw_dev.round(0).tolist(),
+                       "reached_level": f"{int((np.abs(ground - s.top) < 0.02).any(1).sum())}/{S}"}
         print(f"{s.name}: {res[s.name]}", flush=True)
     print(f"success {total}/{len(sc) * S}")
     return res, total

@@ -5,9 +5,11 @@ and the runs that succeed are kept as new reference clips (the robot's own motio
 
 Terrain families (each env its own terrain, all along +x, the robot starts at x = 0 facing +x): stairs up / down
 (riser 8-19 cm, tread 24-36 cm, 3-8 steps), a box in the way (12-32 cm high, 20-50 cm deep, 0.6-2 m wide), a
-platform up / down (8-32 cm), on a 4 cm heightfield 15 m long; command vx 0.3-1.0 m/s, heading held by the operator (rollout_generator.operator).
-Kept: past the feature on the right level, no foot > 4 cm into the terrain, root 0.35 to 1.1 m (+ any drop) above
-the ground, heading within 30 deg, robot within 0.3 m of the plan throughout. Writes a packed library (out.pt,
+platform up / down (8-32 cm), flat ground, on a 4 cm heightfield 15 m long; terrain runs vx 0.3-1.0 m/s (a quarter
+with vy up to 0.3 m/s), flat runs any walking command (half turning); heading held by the operator where not turning
+(rollout_generator.operator).
+Kept: past the feature on the right level (flat: anywhere), no foot > 4 cm into the terrain, root 0.35 to 1.1 m (+ any drop) above
+the ground, heading within 30 deg (unless turning), robot within 0.3 m of the plan throughout. Writes a packed library (out.pt,
 names aug/<family>/<params>/<round>_<env>) with its terrains (out.terrains.npz) and out.json (kept per family).
 """
 
@@ -33,7 +35,7 @@ from supermimic.kinematics.rotations import heading_yaw  # noqa: E402
 from supermimic.terrain.height_scan import HeightScan  # noqa: E402
 from supermimic.terrain.terrains import Terrain, save_terrains, terrains_path  # noqa: E402
 
-FAMILIES = {"stairs_up": 0.25, "stairs_down": 0.2, "box": 0.3, "platform_up": 0.125, "platform_down": 0.125}
+FAMILIES = {"stairs_up": 0.22, "stairs_down": 0.17, "box": 0.26, "platform_up": 0.1, "platform_down": 0.1, "flat": 0.15}
 # 4 cm cells (physics boxes and scans both come from this heightfield), 15 m along x: 12 s at up to 1 m/s
 DX, X0, X1, Y0, Y1 = 0.04, -1.0, 14.0, -1.2, 1.2
 
@@ -45,11 +47,21 @@ def grid():
 
 
 def sample_scene(rng: np.random.Generator):
-    """-> family, name params, heightfield, start ground, target top, x the root must pass, vx."""
+    """-> family, name params, heightfield, start ground, target top, x the root must pass (None: flat), command
+    (vx, vy, wz; wz 0 = heading held). Terrain runs: vx 0.3-1.0 m/s, a quarter with vy up to 0.3 m/s; flat runs: any
+    walking command, half turning."""
     X, Y = grid()
     fam = rng.choice(list(FAMILIES), p=list(FAMILIES.values()))
     vx = float(rng.uniform(0.3, 1.0))
-    if fam.startswith("stairs"):
+    vy = float(rng.uniform(-0.3, 0.3)) if rng.random() < 0.25 else 0.0
+    wz = 0.0
+    if fam == "flat":
+        vx, vy = float(rng.uniform(-0.4, 1.2)), float(rng.uniform(-0.4, 0.4))
+        wz = float(rng.uniform(-0.8, 0.8)) if rng.random() < 0.5 else 0.0
+        hf = np.zeros_like(X)
+        par = "flat"
+        past = None
+    elif fam.startswith("stairs"):
         r, t, n, x0 = rng.uniform(0.08, 0.19), rng.uniform(0.24, 0.36), int(rng.integers(3, 9)), rng.uniform(0.8, 2.0)
         k = np.clip(np.floor((X - x0) / t) + 1, 0, n)
         hf = k * r if fam == "stairs_up" else (n - k) * r
@@ -67,10 +79,10 @@ def sample_scene(rng: np.random.Generator):
         past = x0 + 0.3
     hf = hf.astype(np.float32)
     ter = Terrain(hf, np.array([X0, Y0]), DX)
-    return fam, par, ter, float(ter.h(np.zeros(2))), float(ter.h(np.array([X.max() - 0.1, 0.0]))), past, vx
+    return fam, par, ter, float(ter.h(np.zeros(2))), float(ter.h(np.array([X.max() - 0.1, 0.0]))), past, (vx, vy, wz)
 
 
-def keep_mask(terr, tiles, Q, R, past, top, start_ground, dev):
+def keep_mask(terr, tiles, Q, R, past, top, start_ground, turning, dev):
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(dev)
     feet = FootMetrics(scan, dev)
     _, gap = feet.gap(Q[..., :3], Q[..., 3:7], Q[..., 7:], tiles)
@@ -84,7 +96,8 @@ def keep_mask(terr, tiles, Q, R, past, top, start_ground, dev):
     off = (Q[..., :2] - R[..., :2]).norm(dim=-1).amax(1).cpu().numpy()
     end_x = Q[:, -1, 0].cpu().numpy()
     ok = (pen < 0.04) & (above.min(1) > 0.35) & (above.max(1) < 1.1 + drop) & (np.abs(ground[:, -1] - top) < 0.02)
-    ok &= (end_x > past) & (dev_deg < 30) & (off < 0.3)
+    flat = np.isnan(past)
+    ok &= np.where(flat, True, end_x > np.nan_to_num(past)) & (turning | (dev_deg < 30)) & (off < 0.3)
     return ok
 
 
@@ -114,14 +127,15 @@ def main():
         tiles = torch.arange(a.envs, device=dev)
         start = st.repeat(a.envs, 1)
         start[:, 2] += torch.tensor([s[3] for s in sc], device=dev)
-        cmd_v = torch.tensor([[s[6], 0.0, 0.0] for s in sc], device=dev)
+        cmd_v = torch.tensor([list(s[6]) for s in sc], device=dev)
         Q, R, V = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, work, dev, seed=a.seed * 1000 + rd)
-        ok = keep_mask(terr, tiles, Q, R, np.array([s[5] for s in sc]), np.array([s[4] for s in sc]), np.array([s[3] for s in sc]), dev)
+        ok = keep_mask(terr, tiles, Q, R, np.array([np.nan if s[5] is None else s[5] for s in sc]), np.array([s[4] for s in sc]),
+                       np.array([s[3] for s in sc]), np.array([s[6][2] != 0 for s in sc]), dev)
         for e, s in enumerate(sc):
             stats[s[0]][0] += int(ok[e])
             stats[s[0]][1] += 1
             if ok[e]:
-                names.append(f"aug/{s[0]}/{s[1]}_v{s[6] * 100:.0f}/{a.seed}_{rd}_{e}")
+                names.append(f"aug/{s[0]}/{s[1]}_v{s[6][0] * 100:.0f}_{s[6][1] * 100:.0f}_{s[6][2] * 100:.0f}/{a.seed}_{rd}_{e}")
                 refs.append(torch.cat([Q[e], V[e]], -1).cpu())
                 terrains.append(s[2].padded(1.0))
         print(f"round {rd}: kept {int(ok.sum())}/{a.envs}; so far " + ", ".join(f"{k} {v[0]}/{v[1]}" for k, v in sorted(stats.items())), flush=True)
