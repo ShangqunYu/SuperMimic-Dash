@@ -236,6 +236,7 @@ def main():
     save_terrains(terrains_path(out), names, terrains)
     out.with_suffix(".json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "seconds": a.seconds, "vary": a.vary, "families": FAMILIES,
                                                     "kept": {k: f"{v[0]}/{v[1]}" for k, v in sorted(stats.items())}, "clips": len(names)}, indent=1))
+    work.rmdir()
     print(f"{len(names)} clips ({sum(lens) / 50 / 3600:.2f} h) -> {out}")
 
 

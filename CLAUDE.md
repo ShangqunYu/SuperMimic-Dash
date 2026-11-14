@@ -795,7 +795,13 @@ to run the final student.
   library (ENOSPC). Freed only own scratch: per-round `loop_library_*` files (augment work dirs, gen_eval dirs), the
   DSMS micromamba env in the scratchpad, `/tmp/torchinductor_shangqunyu`. Terrain sidecars are now written with
   `np.savez_compressed` (aug2's 1,113 MB -> 2 MB, identical on read; the three existing aug sidecars rewritten).
-  Check `df -h /` before big writes; the disk is near full from all users.
+  Check `df -h /` before big writes; the disk is near full from all users. `run_loop` now deletes its working library.
+- **aug3a** (`data/library/gen_aug/aug3a.pt`, gen_v5 40k, --vary, seed 11): 6,038 clips, 18.45 h (box 1,688/2,450,
+  platform up 1,179/1,251, stairs down 1,243/1,604, stairs up 1,928/2,887). **aug3b** (`aug3b.pt`, gen_v6 40k, seed 12):
+  4,935 clips, 15.08 h (flat 2,793/5,810, platform down 1,132/1,189, stairs down 1,010/1,193). aug3b flat windows: turning
+  > 0.3 rad 32%, sideways > 0.2 m 24%, backwards 8%, standing 25% (scratchpad `cmd_by_family.py`). Runs **gen_v7** (GPU 0,
+  init gen_v6 40k) and **gen_v8** (GPU 1, init gen_v5 40k): libraries v5 + aug3a + aug3b, `--terrain-share 0.5 0.2 0.3`,
+  `--pen-exact --pen-weight 2`, lr 5e-5, 40k steps (aug1 / aug2 left out).
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%

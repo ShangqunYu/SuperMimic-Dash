@@ -118,6 +118,8 @@ def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: floa
             R.append(L._ref[cmd.frame, :25].float())
             V.append(torch.cat([rd.root_link_lin_vel_w, rd.root_link_ang_vel_w, rd.joint_vel], -1))
     env.close()
+    for f in (lib, terrains_path(lib)):  # working files (~70 MB per 1000 envs)
+        f.unlink(missing_ok=True)
     return torch.stack(Q, 1), torch.stack(R, 1), torch.stack(V, 1)
 
 
