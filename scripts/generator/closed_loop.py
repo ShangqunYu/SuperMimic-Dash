@@ -131,6 +131,7 @@ def main():
     ap.add_argument("--steps", type=int, default=20, help="DDIM steps per plan")
     ap.add_argument("--render", action="store_true")
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--seed", type=int, default=0, help="generator sampling and sim seed")
     a = ap.parse_args()
     dev = a.device
     out = Path(a.out)
@@ -145,7 +146,7 @@ def main():
     start = st.repeat(n, 1)
     start[:, 2] += torch.as_tensor(np.array([t.h(np.zeros(2)) for t in terr]), dtype=torch.float32, device=dev).repeat_interleave(S)
     cmd_v = torch.as_tensor(np.array([s.cmd for s in sc]), dtype=torch.float32, device=dev).repeat_interleave(S, 0)
-    Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, steps=a.steps, guidance=a.guidance)
+    Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, steps=a.steps, guidance=a.guidance, seed=a.seed)
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(dev)
     feet = FootMetrics(scan, dev)
     res, total = score(sc, terr, Q, tiles, feet, S)

@@ -748,6 +748,11 @@ to run the final student.
   `augment.py --trim 1.0` (first second of each kept clip cut) and `scripts/generator/trim_library.py` for aug1
   (`aug1_v1_60k_trim1s.pt`, 15.35 h). Augmentation 2 (`aug2_v1_200k.pt`, gen_v1 200k, seed 1, flat family and vy):
   running.
+- **Closed-loop test noise** (`closed_loop.py --seed`): gen_v1 200k scores 83 / 90 / 91 of 120 on seeds 0 / 1 / 2 (single
+  scenes move by up to 4 of 8, e.g. stairs up 10 cm 4/5/8, box 30 cm 5/7/8). Compare models on 3 seeds; +-5 in the
+  total is noise. Augmentation 2 (`aug2_v1_200k.pt`, trimmed): 5,874 clips, 17.95 h (box 1,349/2,144, flat
+  1,252/1,252, stairs up 916/1,794, down 1,040/1,373, platform up 604/849, down 713/780). Run **`gen_v4`** (GPU 0):
+  `--init gen_v1 200k`, libraries v5 + aug1 trimmed + aug2 with `--terrain-share 0.6 0.2 0.2`, lr 5e-5, 40k steps.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
