@@ -768,6 +768,29 @@ to run the final student.
   walking fine. Fine-tuning on the robot's own executed motion weakens command following (it mostly continues its
   current motion); from a standstill with a turn command the plan follows the robot's first drift. Run **`gen_v6`**
   (GPU 0) = gen_v1 200k + `--pen-exact --pen-weight 2.0`, mocap only (v5 library), lr 5e-5, 40k: the edge fix alone.
+- **gen_v5 / gen_v6 at 40k, 3 seeds (loop, of 24 per scene; reached level in brackets):**
+
+  | | total | turn | sidestep | stairs up 10 / 14 / 18 cm | platform up 30 | platform down 30 / 50 | box 30 |
+  |---|---|---|---|---|---|---|---|
+  | gen_v1 200k | **264** | 17 | 24 | 17 (19) / 2 (19) / 0 (3) | 19 | 24 / 21 | 20 |
+  | gen_v4 40k (aug) | 230 | 8 | 0 | 22 / 2 / 0 | 17 | 23 / 20 | 18 |
+  | gen_v5 40k (aug + exact) | 215 | 5 | 0 | 20 (23) / **16 (24)** / 1 (**16**) | **23** | 10 / 2 | 20 |
+  | gen_v6 40k (exact, mocap) | 250 | **24** | 19 | 12 (18) / 0 (5) / 0 (1) | 13 | 23 / 22 | 17 |
+
+  The stair stall is fixed only by both together (exact penetration + augmented data); the exact loss on mocap alone
+  does not climb. gen_v5 also slows at drops (kinematic platform down 0.32 m/s for 0.6: learned hesitation).
+- **Why augmentation kills turning and sidestepping (2026-11-14):** kinematically gen_v4 / v5 turn and sidestep 8/8 at
+  the commanded speeds; only in physics (history = the robot's own motion) they go straight. Every aug1 / aug2 run
+  held one command for 11 s, so the aug windows hardly turn or sidestep (turning > 0.3 rad within 1.2 s: aug 5-9% of
+  windows, mocap flat 26%; sideways > 0.2 m: 5-16% vs 36%; scratchpad `cmd_predict.py`): physics-looking history
+  came to mean "keep going straight". **`augment.py --vary`**: the joystick changes every 2-4 s
+  (`command_schedule`: flat stand 15%, turns at a set rate, steering to new headings up to 90 deg away, sidesteps to
+  0.5 m/s, backwards; terrain speed changes, sidesteps to 0.3 m/s and headings up to 20 deg off the course),
+  `operator` takes a target heading, `run_loop` takes a per-step schedule (n, T, 4). New keep rules: heading within
+  30 deg of the target once settled, flat runs must follow each command segment (`follows`, one miss allowed), box
+  and platform-down runs at least 0.4 of the commanded speed, the strip widened to y +-2 m (kept within 2.4 m).
+  Test (gen_v6, 128 envs): flat windows turn 32%, backwards 10%, stand 17%. **aug3a** (gen_v5: stairs up / box /
+  platform up / stairs down) and **aug3b** (gen_v6: flat 0.7, platform down, stairs down), 8 x 1024 envs each.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%

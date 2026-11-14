@@ -64,7 +64,8 @@ def with_velocities(cur: torch.Tensor, plan: torch.Tensor) -> torch.Tensor:
 def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: float, workdir: Path, dev: str, steps: int = 20, guidance: float = 1.0,
              seed: int = 0):
     """Generator + teacher in physics. terr: list of Terrain; tiles (n,) each env's terrain; start (n, 25) its start
-    pose; cmd_v (n, 3) its joystick command (operator heading hold applies). -> robot frames Q (n, T, 25), the
+    pose; cmd_v (n, 3) its joystick command (operator heading hold to yaw 0 applies), or a schedule (n, T, 4) per
+    step: vx, vy, wz, the heading held where wz is 0. -> robot frames Q (n, T, 25), the
     tracked plan frame R (n, T, 25), robot velocities V (n, T, 6 + NJ) [root lin vel w, root ang vel w, joint vel]."""
     n = len(tiles)
     T = int(seconds * 50)
@@ -103,7 +104,7 @@ def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: floa
                 s49 = torch.zeros(n, 49, device=dev)
                 s49[:, :7] = cur[:, :7]
                 hmap = (scan(s49, tiles) - origin[:, 2:3]).reshape(n, *GRID_SHAPE)
-                c = command_path(buf, operator(buf, cmd_v))
+                c = command_path(buf, operator(buf, cmd_v) if cmd_v.dim() == 2 else operator(buf, cmd_v[:, t, :3], cmd_v[:, t, 3]))
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     x = diff.sample(model, nm.frames(hist), nm.hmap(hmap), nm.cmd(c), torch.ones(n, device=dev), steps=steps, guidance=guidance, generator=g).float()
                 pos, quat, q = from_canonical(nm.frames_inv(x), origin, yaw0)

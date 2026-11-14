@@ -105,13 +105,14 @@ def standing_frame(lib: str, device: str) -> torch.Tensor:
 HOLD_GAIN, HOLD_MAX = 2.0, 1.0  # heading-holding operator: wz = gain x heading error (rad/s), capped
 
 
-def operator(traj: torch.Tensor, cmd: torch.Tensor) -> torch.Tensor:
+def operator(traj: torch.Tensor, cmd: torch.Tensor, target: torch.Tensor | None = None) -> torch.Tensor:
     """The joystick a person would give: the scene's command, but where it asks for no turning the yaw rate steers
-    back to the start heading (yaw 0), as an operator corrects drift. traj (B, T, 25), cmd (B, 3) -> (B, 3)."""
+    to the target heading (B,) (default the start heading, yaw 0), as an operator corrects drift. traj (B, T, 25),
+    cmd (B, 3) -> (B, 3)."""
     out = cmd.clone()
     hold = cmd[:, 2] == 0
-    yaw = heading_yaw(traj[:, -1, 3:7])
-    out[:, 2] = torch.where(hold, (-HOLD_GAIN * torch.atan2(torch.sin(yaw), torch.cos(yaw))).clamp(-HOLD_MAX, HOLD_MAX), cmd[:, 2])
+    err = (0.0 if target is None else target) - heading_yaw(traj[:, -1, 3:7])
+    out[:, 2] = torch.where(hold, (HOLD_GAIN * torch.atan2(torch.sin(err), torch.cos(err))).clamp(-HOLD_MAX, HOLD_MAX), cmd[:, 2])
     return out
 
 
