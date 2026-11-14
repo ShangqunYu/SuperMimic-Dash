@@ -25,7 +25,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rollout_generator import DX, REPLAN, X0, Y0, command_path, first_library, load, operator, scenes, score, standing_frame  # noqa: E402
+from rollout_generator import DX, REPLAN, VEL_HALFLIFE, X0, Y0, command_path, first_library, load, operator, scenes, score, standing_frame  # noqa: E402
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env  # noqa: E402
 from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoint  # noqa: E402
@@ -62,10 +62,11 @@ def with_velocities(cur: torch.Tensor, plan: torch.Tensor) -> torch.Tensor:
 
 
 def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: float, workdir: Path, dev: str, steps: int = 20, guidance: float = 1.0,
-             seed: int = 0):
+             seed: int = 0, replan: int = REPLAN, halflife: float = VEL_HALFLIFE):
     """Generator + teacher in physics. terr: list of Terrain; tiles (n,) each env's terrain; start (n, 25) its start
     pose; cmd_v (n, 3) its joystick command (operator heading hold to yaw 0 applies), or a schedule (n, T, 4) per
-    step: vx, vy, wz, the heading held where wz is 0. -> robot frames Q (n, T, 25), the
+    step: vx, vy, wz, the heading held where wz is 0. replan: frames between plans; halflife: the command path's
+    velocity spring (rollout_generator.command_path). -> robot frames Q (n, T, 25), the
     tracked plan frame R (n, T, 25), robot velocities V (n, T, 6 + NJ) [root lin vel w, root ang vel w, joint vel]."""
     n = len(tiles)
     T = int(seconds * 50)
@@ -96,7 +97,7 @@ def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: floa
     Q, R, V = [], [], []
     with torch.no_grad():
         for t in range(T):
-            if t % REPLAN == 0:
+            if t % replan == 0:
                 cur = buf[:, -1]
                 origin, yaw0 = cur[:, :3], heading_yaw(cur[:, 3:7])
                 h = buf[:, -H:]
@@ -104,7 +105,7 @@ def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: floa
                 s49 = torch.zeros(n, 49, device=dev)
                 s49[:, :7] = cur[:, :7]
                 hmap = (scan(s49, tiles) - origin[:, 2:3]).reshape(n, *GRID_SHAPE)
-                c = command_path(buf, operator(buf, cmd_v) if cmd_v.dim() == 2 else operator(buf, cmd_v[:, t, :3], cmd_v[:, t, 3]))
+                c = command_path(buf, operator(buf, cmd_v) if cmd_v.dim() == 2 else operator(buf, cmd_v[:, t, :3], cmd_v[:, t, 3]), halflife)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     x = diff.sample(model, nm.frames(hist), nm.hmap(hmap), nm.cmd(c), torch.ones(n, device=dev), steps=steps, guidance=guidance, generator=g).float()
                 pos, quat, q = from_canonical(nm.frames_inv(x), origin, yaw0)
@@ -135,6 +136,8 @@ def main():
     ap.add_argument("--render", action="store_true")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--seed", type=int, default=0, help="generator sampling and sim seed")
+    ap.add_argument("--replan", type=int, default=REPLAN, help="frames between plans")
+    ap.add_argument("--halflife", type=float, default=VEL_HALFLIFE, help="s, the command path's velocity spring")
     a = ap.parse_args()
     dev = a.device
     out = Path(a.out)
@@ -149,14 +152,15 @@ def main():
     start = st.repeat(n, 1)
     start[:, 2] += torch.as_tensor(np.array([t.h(np.zeros(2)) for t in terr]), dtype=torch.float32, device=dev).repeat_interleave(S)
     cmd_v = torch.as_tensor(np.array([s.cmd for s in sc]), dtype=torch.float32, device=dev).repeat_interleave(S, 0)
-    Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, steps=a.steps, guidance=a.guidance, seed=a.seed)
+    Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, steps=a.steps, guidance=a.guidance, seed=a.seed,
+                       replan=a.replan, halflife=a.halflife)
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(dev)
     feet = FootMetrics(scan, dev)
     res, total = score(sc, terr, Q, tiles, feet, S)
     off = (Q[..., :2] - R[..., :2]).norm(dim=-1)
     for k, s in enumerate(sc):
         res[s.name]["robot_vs_plan_xy_max_m"] = off[k * S : (k + 1) * S].amax(1).cpu().numpy().round(2).tolist()
-    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "step": ck["step"], "guidance": a.guidance, "success": f"{total}/{n}", "scenes": res}, indent=1))
+    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "step": ck["step"], "guidance": a.guidance, "replan": a.replan, "halflife": a.halflife, "success": f"{total}/{n}", "scenes": res}, indent=1))
     torch.save({"robot": Q.cpu(), "plan": R.cpu(), "scenes": [s.name for s in sc], "samples": S}, out / "traj.pt")
     if a.render:
         render_all(sc, terr, Q[::S].cpu().numpy(), R[::S].cpu().numpy(), out)

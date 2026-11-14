@@ -38,7 +38,8 @@ REPO = Path(__file__).resolve().parents[2]
 DX = 0.02
 X0, X1, Y0, Y1 = -2.0, 9.0, -2.0, 2.0
 REPLAN = 10  # frames between plans
-VEL_HALFLIFE = 0.3
+VEL_HALFLIFE = 0.1  # s. 0.3 made plans start slowly (the command reached its speed late); replanned every 0.2 s from a
+# robot lagging each plan, the speed settled low: sidesteps and edges stalled (closed loop gen_v6 250 -> 310 of 360)
 
 
 @dataclass
@@ -116,16 +117,16 @@ def operator(traj: torch.Tensor, cmd: torch.Tensor, target: torch.Tensor | None 
     return out
 
 
-def command_path(traj: torch.Tensor, cmd: torch.Tensor) -> torch.Tensor:
+def command_path(traj: torch.Tensor, cmd: torch.Tensor, halflife: float = VEL_HALFLIFE) -> torch.Tensor:
     """traj (B, T, 25) rollout so far, cmd (B, 3) -> (B, 12) command features in the current frame: the root
-    velocity springs from its recent value to the command (half-life VEL_HALFLIFE), integrated forward."""
+    velocity springs from its recent value to the command (half-life `halflife` s), integrated forward."""
     cur, prev = traj[:, -1], traj[:, -REPLAN - 1]
     yaw0, yawp = heading_yaw(cur[:, 3:7]), heading_yaw(prev[:, 3:7])
     c, s = torch.cos(yaw0), torch.sin(yaw0)
     d = (cur[:, :2] - prev[:, :2]) / (REPLAN * 0.02)
     v0 = torch.stack([c * d[:, 0] + s * d[:, 1], -s * d[:, 0] + c * d[:, 1]], -1)
     w0 = torch.atan2(torch.sin(yaw0 - yawp), torch.cos(yaw0 - yawp)) / (REPLAN * 0.02)
-    lam = math.log(2) / VEL_HALFLIFE
+    lam = math.log(2) / halflife
     p = torch.zeros_like(v0)
     th = torch.zeros_like(w0)
     feats = []
@@ -179,13 +180,14 @@ def score(sc, terr, traj, tiles, feet, S):
         ground = np.array([[terr[k].h(p[:2]) for p in row] for row in tr[:, :, :3].cpu().numpy()])  # (S, T)
         above = tr[:, :, 2].cpu().numpy() - ground
         end_x = tr[:, -1, 0].cpu().numpy()
-        # mean planar velocity and yaw rate over the second half
+        # mean planar speed (path length, root sampled every 0.5 s so the gait's sway does not count; the chord of a
+        # 0.6 rad/s turn over 6 s is ~half the path) and yaw rate over the second half
         half = tr.shape[1] // 2
         span = (tr.shape[1] - 1 - half) * 0.02
-        v = ((tr[:, -1, :2] - tr[:, half, :2]) / span).cpu().numpy()
         dyaw = heading_yaw(tr[:, -1, 3:7]) - heading_yaw(tr[:, half, 3:7])
         yaw_rate = (torch.atan2(torch.sin(dyaw), torch.cos(dyaw)) / span).cpu().numpy()
-        speed = np.linalg.norm(v, axis=1)
+        pts = tr[:, half::25, :2]
+        speed = ((pts[:, 1:] - pts[:, :-1]).norm(dim=-1).sum(1) / ((pts.shape[1] - 1) * 25 * 0.02)).cpu().numpy()
         yaw_all = heading_yaw(tr[..., 3:7])
         yaw_dev = np.degrees(torch.atan2(torch.sin(yaw_all), torch.cos(yaw_all)).abs().amax(1).cpu().numpy())  # from the start heading
         # sliding is reported, not scored: mocap flat walking itself reads ~0.5 m/s here (low swing clearance)

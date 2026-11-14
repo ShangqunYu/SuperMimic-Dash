@@ -2,7 +2,7 @@
 and the runs that succeed are kept as new reference clips (the robot's own motion, physically feasible for Dash).
 
   python scripts/generator/augment.py gen_ckpt teacher_ckpt out.pt [--envs 1024] [--rounds 4] [--seconds 12] [--seed 0]
-      [--vary] [--families flat=0.4,stairs_up=0.2,...]
+      [--vary] [--families flat=0.4,stairs_up=0.2,...] [--halflife 0.1] [--follow-tol 0.67]
 
 Terrain families (each env its own terrain, all along +x, the robot starts at x = 0 facing +x): stairs up / down
 (riser 8-19 cm, tread 24-36 cm, 3-8 steps), a box in the way (12-32 cm high, 20-50 cm deep, 0.6-2 m wide), a
@@ -16,7 +16,7 @@ the ground, heading within 30 deg of the operator's target once settled (1.5 s a
 set rate), robot within 0.3 m of the plan and (not flat) 2.4 m of the strip's centre line throughout; box and platform down: mean
 speed along x at least 0.4 of the commanded (no long hesitation at the edge); flat --vary: each command segment
 followed after its first second (vx within 0.15 + 30%, vy within 0.12 + 30%, a set yaw rate within 0.2 + 40%; one
-segment may miss). The first --trim s
+segment may miss; --follow-tol scales these). The first --trim s
 (1.0) are cut: every run starts from the same settled standing pose with the teacher lagging the first plans, and
 5,000 copies of that start taught gen_v3 to hesitate from a standstill. Writes a packed library (out.pt,
 names aug/<family>/<params>/<round>_<env>) with its terrains (out.terrains.npz) and out.json (kept per family).
@@ -36,7 +36,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from closed_loop import run_loop  # noqa: E402
-from rollout_generator import first_library, load, standing_frame  # noqa: E402
+from rollout_generator import VEL_HALFLIFE, first_library, load, standing_frame  # noqa: E402
 
 from supermimic.generator.data import GEN_GRID  # noqa: E402
 from supermimic.generator.metrics import FootMetrics  # noqa: E402
@@ -120,9 +120,9 @@ def command_schedule(rng: np.random.Generator, fam: str, steps: int) -> np.ndarr
     return out
 
 
-def follows(Q, sched, dt=0.02, settle=50):
+def follows(Q, sched, dt=0.02, settle=50, tol=1.0):
     """Flat --vary runs: per command segment (after its first `settle` steps) the robot's mean heading-frame velocity
-    and yaw rate vs the joystick; -> segments missed per env (n,)."""
+    and yaw rate vs the joystick (tolerances scaled by `tol`); -> segments missed per env (n,)."""
     yaw = heading_yaw(Q[..., 3:7]).cpu().numpy()
     xy = Q[..., :2].cpu().numpy()
     v = np.diff(xy, axis=1) / dt
@@ -137,13 +137,13 @@ def follows(Q, sched, dt=0.02, settle=50):
                 continue
             cvx, cvy, cwz = sched[e, a, :3]
             m = vb[e, a + settle : b].mean(0)
-            bad = abs(m[0] - cvx) > 0.15 + 0.3 * abs(cvx) or abs(m[1] - cvy) > 0.12 + 0.3 * abs(cvy)
-            bad |= cwz != 0 and abs(wz[e, a + settle : b].mean() - cwz) > 0.2 + 0.4 * abs(cwz)
+            bad = abs(m[0] - cvx) > tol * (0.15 + 0.3 * abs(cvx)) or abs(m[1] - cvy) > tol * (0.12 + 0.3 * abs(cvy))
+            bad |= cwz != 0 and abs(wz[e, a + settle : b].mean() - cwz) > tol * (0.2 + 0.4 * abs(cwz))
             miss[e] += int(bad)
     return miss
 
 
-def keep_mask(terr, tiles, Q, R, past, top, start_ground, sched, fams, dev, vary=False):
+def keep_mask(terr, tiles, Q, R, past, top, start_ground, sched, fams, dev, vary=False, tol=1.0):
     """sched (n, T, 4) each env's joystick (vx, vy, wz, target heading where wz is 0); fams (n,) family names."""
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(dev)
     feet = FootMetrics(scan, dev)
@@ -173,7 +173,7 @@ def keep_mask(terr, tiles, Q, R, past, top, start_ground, sched, fams, dev, vary
     speed = (end_x - Q[:, 0, 0].cpu().numpy()) / (Q.shape[1] * 0.02)
     ok &= ~slow | (speed >= 0.4 * sched[..., 0].mean(1))
     if vary:
-        ok &= (fams != "flat") | (follows(Q, sched) <= 1)
+        ok &= (fams != "flat") | (follows(Q, sched, tol=tol) <= 1)
     return ok
 
 
@@ -189,6 +189,8 @@ def main():
     ap.add_argument("--trim", type=float, default=1.0, help="s cut from the start of each kept clip (the settled standing start, the teacher lagging the first plans)")
     ap.add_argument("--vary", action="store_true", help="joystick changes every 2-4 s (command_schedule)")
     ap.add_argument("--families", default=None, help="family weights, e.g. flat=0.4,stairs_up=0.3 (others 0)")
+    ap.add_argument("--halflife", type=float, default=VEL_HALFLIFE, help="s, the command path's velocity spring (closed_loop.run_loop)")
+    ap.add_argument("--follow-tol", type=float, default=1.0, help="scales the flat --vary command-following tolerances (follows)")
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
     if a.families:
@@ -217,9 +219,10 @@ def main():
         else:
             sched = np.zeros((a.envs, T, 4), np.float32)
             sched[..., :3] = np.array([list(s[6]) for s in sc], np.float32)[:, None]
-        Q, R, V = run_loop(model, diff, a.teacher, terr, tiles, start, torch.as_tensor(sched, device=dev), a.seconds, work, dev, seed=a.seed * 1000 + rd)
+        Q, R, V = run_loop(model, diff, a.teacher, terr, tiles, start, torch.as_tensor(sched, device=dev), a.seconds, work, dev, seed=a.seed * 1000 + rd,
+                           halflife=a.halflife)
         ok = keep_mask(terr, tiles, Q, R, np.array([np.nan if s[5] is None else s[5] for s in sc]), np.array([s[4] for s in sc]),
-                       np.array([s[3] for s in sc]), sched, np.array([s[0] for s in sc]), dev, vary=a.vary)
+                       np.array([s[3] for s in sc]), sched, np.array([s[0] for s in sc]), dev, vary=a.vary, tol=a.follow_tol)
         for e, s in enumerate(sc):
             stats[s[0]][0] += int(ok[e])
             stats[s[0]][1] += 1
@@ -234,7 +237,7 @@ def main():
     torch.save({"ref": torch.cat(refs).half(), "names": names, "starts": starts, "lengths": lens, "robot": "dash",
                 "clip_tile": list(range(len(names))), "terrain_names": names}, out)
     save_terrains(terrains_path(out), names, terrains)
-    out.with_suffix(".json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "seconds": a.seconds, "vary": a.vary, "families": FAMILIES,
+    out.with_suffix(".json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "seconds": a.seconds, "vary": a.vary, "halflife": a.halflife, "follow_tol": a.follow_tol, "families": FAMILIES,
                                                     "kept": {k: f"{v[0]}/{v[1]}" for k, v in sorted(stats.items())}, "clips": len(names)}, indent=1))
     work.rmdir()
     print(f"{len(names)} clips ({sum(lens) / 50 / 3600:.2f} h) -> {out}")

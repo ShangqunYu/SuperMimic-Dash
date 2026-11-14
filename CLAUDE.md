@@ -806,6 +806,36 @@ to run the final student.
     plan ~8 cm on all terrain (root z error at zero noise +7 to +11 cm, kinematic scenes 29-34 / 120; logged loss_foot
     0.31 vs 0.02 because it is logged unweighted). Discarded (logs `gen_v7.out.foot0`, `gen_v8.out.foot0`);
     train_generator.py now refuses `--pen-weight` without `--foot-weight`. Relaunched 2026-11-14 ~10:10 with foot 1.0.
+- **gen_v7 / gen_v8 40k, 3 seeds: 236 / 202** (old scoring): gen_v7 climbs (stairs 18 cm reached level 20/24, platform
+  up 30 cm 24) and turns again (16), but sidestep 0/24 and platform down 50 cm 3/24; gen_v8 (from gen_v5) worse.
+- **Stalls came from the command path, not the models (2026-11-14):** replanned offline from gen_v7's recorded robot
+  history (scratchpad `replan_probe.py`): from a standstill the plan reaches the commanded 1.2 s point but moves only
+  ~0.1 m/s over its first 0.2 s; the robot executes only that and lags it, the next plan starts from the slower robot,
+  and the speed settles near zero (sidestep stops after ~3 s with plans still asking for 0.3 m; 50 cm drop approached
+  at 0.1-0.3 m/s and stalled at the edge). `command_path`'s spring (velocity from the robot's to the joystick's,
+  half-life `VEL_HALFLIFE` 0.3 s) let plans start late. Physics-augmented data makes it worse (the robot lags every
+  plan and the generator learns that lag). `closed_loop.py --halflife` / `--replan` (`augment.py --halflife`).
+- **Turn scene scoring fix:** speed was the chord over the second half; at 0.6 rad/s for 6 s the chord is ~half the
+  path, so turning at the commanded rate failed the speed rule (turning less passed). Now path length with the root
+  sampled every 0.5 s. All runs rescored (scratchpad `rescore_agg.py`). **Closed loop, 3 seeds, new scoring (of 24;
+  reached level in brackets):**
+
+  | | total | turn | sidestep | stairs up 10 / 14 / 18 cm | platform up 30 | platform down 50 | box 30 |
+  |---|---|---|---|---|---|---|---|
+  | gen_v1 200k, half-life 0.3 | 271 | 24 | 24 | 17 / 2 / 0 (19 / 19 / 3) | 19 | 21 | 20 |
+  | gen_v1 200k, 0.15 | 311 | 20 | 24 | 22 / 23 / 15 | 17 | 24 | 22 |
+  | gen_v5 40k, 0.3 / 0.15 | 216 / 262 | 6 / 2 | 0 / 5 | 20 / 22 / 20 (0.15) | 23 | 2 / 7 | 22 |
+  | gen_v6 40k, 0.3 | 250 | 24 | 19 | 12 / 0 / 0 (18 / 5 / 1) | 13 | 22 | 17 |
+  | gen_v6 40k, 0.15 / **0.1** / 0.05 | 299 / **310** / 314 | 24 / **22** / 14 | 24 | 21 / 23 / 22 (0.1) | 12 | 24 | 18 |
+  | gen_v7 40k, 0.3 / 0.15 / 0.1 / 0.05 | 243 / 296 / 296 / 290 | 23 / 22 / 19 / 13 | 0 | 23 / 23 / 22 (0.15) | 24 | 16 / 18 / 20 | 23 |
+
+  Replan every 0.4 s (`--replan 20`) instead: gen_v6 275, gen_v7 239 (turning drops). **`VEL_HALFLIFE` now 0.1**
+  (default for the kinematic test, closed loop and augment). gen_v6's platform-up misses are a deep crouch (root
+  0.37-0.40 m over the edge vs the 0.4 rule, all 24 reach the top); gen_v7 (aug-trained) steps up tall (0.44-0.6).
+  gen_v7 sidesteps at 0.15 m/s for 0.4 even at 0.05 (the aug3b sidesteps were slow: v6 at 0.3, `follows` passes
+  0.16 m/s for 0.4). platform up 50 cm: 0 for every model. **aug4a** (gen_v7 40k, terrain families as aug3a, seed 13)
+  and **aug4b** (gen_v6 40k, families as aug3b, seed 14): `--vary --halflife 0.1 --follow-tol 0.67` (flat segments
+  within 0.08 + 20% sideways), 8 x 1024 envs.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
