@@ -753,6 +753,16 @@ to run the final student.
   total is noise. Augmentation 2 (`aug2_v1_200k.pt`, trimmed): 5,874 clips, 17.95 h (box 1,349/2,144, flat
   1,252/1,252, stairs up 916/1,794, down 1,040/1,373, platform up 604/849, down 713/780). Run **`gen_v4`** (GPU 0):
   `--init gen_v1 200k`, libraries v5 + aug1 trimmed + aug2 with `--terrain-share 0.6 0.2 0.2`, lr 5e-5, 40k steps.
+- **gen_v4 20k, 3 seeds: 249 / 360** (gen_v1 200k 264): sidestep 0/24 (it sidesteps at ~0.2 m/s for a 0.4 command:
+  outside the 30% speed rule), terrain slightly better (stairs 10 cm 20 vs 17, box 30 cm 22 vs 20).
+- **Stall at the top of tall stairs** (both models, 14 / 18 cm x 6): about one step per second up to the last step,
+  then the *plan* stays put for 3-6 s (plan = robot). Not the mocap (US stair clips keep 0.26 m/s to their end) nor a
+  lack of tall stairs in the augmentation (307 kept climbs >= 90 cm). The generator alone reaches the top 8/8 but its
+  soles cut the stair edges by 12-18 cm on the way: in physics the last riser blocks the robot and, replanned from that
+  state, the plan stalls. The penetration loss's 3 x 3 minimum on the 5 cm heightmap leaves ~5 cm of slack at every
+  edge. **`--pen-exact`**: soles checked against each terrain's own heightfield (2-4 cm cells; gradient through the sole
+  height). On data: clean clips 0.0023 (3 x 3 min 0.0034), soles 6 cm forward (into risers) 0.073 (0.012), 5 cm down
+  1.26 (1.16). Run **`gen_v5`** (GPU 1) = gen_v4 + `--pen-exact --pen-weight 2.0`.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%
