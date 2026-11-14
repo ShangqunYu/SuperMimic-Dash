@@ -791,6 +791,11 @@ to run the final student.
   and platform-down runs at least 0.4 of the commanded speed, the strip widened to y +-2 m (kept within 2.4 m).
   Test (gen_v6, 128 envs): flat windows turn 32%, backwards 10%, stand 17%. **aug3a** (gen_v5: stairs up / box /
   platform up / stairs down) and **aug3b** (gen_v6: flat 0.7, platform down, stairs down), 8 x 1024 envs each.
+- **Root disk full (2026-11-14 08:45, shared 913 GB volume):** both aug3 runs died writing their per-round loop
+  library (ENOSPC). Freed only own scratch: per-round `loop_library_*` files (augment work dirs, gen_eval dirs), the
+  DSMS micromamba env in the scratchpad, `/tmp/torchinductor_shangqunyu`. Terrain sidecars are now written with
+  `np.savez_compressed` (aug2's 1,113 MB -> 2 MB, identical on read; the three existing aug sidecars rewritten).
+  Check `df -h /` before big writes; the disk is near full from all users.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%

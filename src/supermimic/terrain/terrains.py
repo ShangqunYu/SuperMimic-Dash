@@ -126,9 +126,10 @@ def terrains_path(library: str | Path) -> Path:
 
 
 def save_terrains(path: str | Path, names: list[str], terrains: list[Terrain]) -> TerrainSet:
-    """Write the sidecar (heightfields as given, so pad them first) with their physics boxes."""
+    """Write the sidecar (heightfields as given, so pad them first) with their physics boxes; compressed (procedural
+    heightfields are mostly constant: ~1 GB raw per few thousand terrains)."""
     boxes = [t.boxes() for t in terrains]
-    np.savez(
+    np.savez_compressed(
         path,
         names=np.array(names),
         heights=np.concatenate([t.hf.astype(np.float32).ravel() for t in terrains]) if terrains else np.zeros(0, np.float32),
