@@ -904,6 +904,30 @@ warm-up first) is a possible later step if the DAgger student falls short of the
 - **Cost**: env step 18.9 -> 40.2 ms at 4110 envs (17.1 -> 22.2 at 1035); the camera renders every step though
   each env takes a frame every 5th. Rendering only every 5th step (synchronized phases) would recover most of it.
 
+- **Student** (`student/model.py`, 0.88 M parameters): CNN per 64x48 depth frame -> a token (encoded once when the
+  frame arrives); 3-layer transformer (128 wide, 4 heads) over a readout token, 20 depth tokens (one per 5 steps:
+  2 s) and 25 proprio + joystick tokens (the env's `proprio` group, history-free, + the operator's vx, vy, wz:
+  0.5 s); out the 18 joint-position actions. Proprio normalization frozen from round 0's data.
+- **DAgger** (`scripts/student/dagger.py`): per round 2048 envs on augment.py's random terrains with its varying
+  joystick (12 s), all of the student's training conditions on; the generator replans every 0.2 s from the robot's
+  actual motion and the teacher's action is the label at every step; the teacher drives a share 0.5^round of
+  the envs (round 0: all). A robot counts as down (later steps dropped) when its root is within 0.3 m of the
+  ground or tilted past 60 deg; no resets within a round. Trains on the last 12 rounds (uint8 depth; ~11 GB GPU):
+  1500 steps per round, batch 1024 windows, AdamW 3e-4, cosine to 0.1x. A round: ~127 s collecting (84 s of it
+  the generator's 60 plans at 2048 envs, 20 DDIM steps) + 45 s training; 40 rounds ~2 h.
+- **Eval** (`scripts/student/eval_student.py ckpt out [--clean]`): the student alone (joystick + proprio + depth;
+  no generator, no teacher) on rollout_generator's 15 scenes, scored as closed_loop.py, default noisy.
+- **dagger_v1** (augment.py's family mix, flat 15%): eval per 5 rounds 35, 64, 90, 98, 97, 93, 96, 98 / 120 (flat
+  command following came last: round 10 walked 0.4 m/s for 0.6, turned the wrong way, sidestepped 0.15-0.25 m/s;
+  fixed by round 20 without changing the mix). Student-driven envs up 96 % by the end, action MSE to the
+  teacher 0.048. Final, 3 seeds (noisy): **284 / 360** vs the generator + teacher's 294 under the same DR.
+  Equal or better on flat, stairs down, drops and 10 cm stairs; short on stairs up 14 cm (15 vs 20 of 24), 18 cm
+  (6 vs 10; reached the top 22 / 24, slow) and platform up 30 cm (14 vs 17).
+- **dagger_v2** (flat 0.35, stairs up 0.2, down 0.12, box 0.15, platform up 0.1, down 0.08; sidestep segments 0.25;
+  seed 1): ahead early (54 vs 35 at round 5), 106 / 120 at round 25.
+- **CPU** (eager PyTorch, this Threadripper 9960X, one robot): transformer 1.4 ms + depth encode 0.6 ms every 5th step
+  at 1 thread (0.9 + 0.5 ms at 4). The UP Xtreme's i7 is slower per core, but the 20 ms step leaves a wide margin.
+
 ## PARC terrain data (2026-11-08, lab server)
 
 Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SIGGRAPH 2025; MIT):
