@@ -91,7 +91,9 @@ def evaluate(student: Student, out: Path, start: torch.Tensor, env_kw: dict, sam
         res, total = score(sc, terr, Q, tiles, FootMetrics(scan, dev), S)
     torch.save({"robot": Q.cpu(), "scenes": [s.name for s in sc], "samples": S}, out / "traj.pt")
     if render:
-        render_all(sc, terr, Q[::S].cpu().numpy(), Q[::S].cpu().numpy(), out)
+        hidden = Q[::S].clone()
+        hidden[..., 2] -= 50.0  # no reference here: the renderer's ghost goes far below the floor
+        render_all(sc, terr, Q[::S].cpu().numpy(), hidden.cpu().numpy(), out)
     return res, total, n
 
 

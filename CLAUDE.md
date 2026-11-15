@@ -924,7 +924,12 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   Equal or better on flat, stairs down, drops and 10 cm stairs; short on stairs up 14 cm (15 vs 20 of 24), 18 cm
   (6 vs 10; reached the top 22 / 24, slow) and platform up 30 cm (14 vs 17).
 - **dagger_v2** (flat 0.35, stairs up 0.2, down 0.12, box 0.15, platform up 0.1, down 0.08; sidestep segments 0.25;
-  seed 1): ahead early (54 vs 35 at round 5), 106 / 120 at round 25.
+  seed 1): ahead early (54 vs 35 at round 5). 3 seeds (eval seeds 100-102, noisy): round 25 **292**, 35 290, 40 291
+  / 360, i.e. the demonstrator's 294: DAgger has converged on it. Round 25 vs generator + teacher: stairs up 18 cm
+  15 vs 10, sidestep 22 vs 23, platform up 30 cm 11 vs 17 (round 40: 21, but sidestep 14). **Best student so far:
+  `logs/student/dagger_v2/ckpt_024.pt`.** Clips: `logs/student/eval/v2_024_render/`.
+- **Eval noise**: the same checkpoint and eval seed gave 98 and then 107 / 120 (GPU physics is not bit-reproducible),
+  so +-5-10 per 120 between runs; compare on 3 seeds and treat < ~10 / 360 as a tie.
 - **CPU** (eager PyTorch, this Threadripper 9960X, one robot): transformer 1.4 ms + depth encode 0.6 ms every 5th step
   at 1 thread (0.9 + 0.5 ms at 4). The UP Xtreme's i7 is slower per core, but the 20 ms step leaves a wide margin.
 
