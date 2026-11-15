@@ -83,10 +83,8 @@ class Replay:
         return self.P[r[:, None], e[:, None], pi].float(), self.D[r[:, None], e[:, None], ki].float() / 255, self.A[r, e, t].float()
 
 
-@torch.no_grad()
-def collect(gen, diff, teacher, env_kw, student: Student, beta: float, rng, st, a, rd: int, dev: str):
-    """One round: -> data (P, D, A, alive) and stats."""
-    n, T = a.envs, int(a.seconds * 50)
+def sample_scenes(rng, a, n: int, T: int):
+    """-> n scenes (augment.sample_scene's fields) and their joysticks (n, T, 4) per --courses / --course-share."""
     if a.courses:  # a share --course-share of courses (families "fast_*" when mixed), the rest augment.py's scenes
         sc, sched = [], []
         for _ in range(n):
@@ -98,21 +96,68 @@ def collect(gen, diff, teacher, env_kw, student: Student, beta: float, rng, st, 
                 s = sample_scene(rng)
                 sched.append(command_schedule(rng, s[0], T, a.sidestep))
                 sc.append(s)
-        sched = np.stack(sched)
-    else:
-        sc = [sample_scene(rng) for _ in range(n)]
-        sched = np.stack([command_schedule(rng, s[0], T, a.sidestep) for s in sc])
-    sched = torch.as_tensor(sched, device=dev)
+        return sc, np.stack(sched)
+    sc = [sample_scene(rng) for _ in range(n)]
+    return sc, np.stack([command_schedule(rng, s[0], T, a.sidestep) for s in sc])
+
+
+def open_round(sc, st, gen, env_kw, lib: Path, T: int, seed: int, dev: str):
+    """The student's env (training conditions) with one scene per env, each robot standing at its start.
+    -> env, cmd, obs, scan, tiles, origins."""
+    n = len(sc)
     terr = [s[2] for s in sc]
     tiles = torch.arange(n, device=dev)
     start = st.repeat(n, 1)
     start[:, 2] += torch.tensor([s[3] for s in sc], device=dev)
-    lib = Path(a.run) / "round_library.pt"
     build_library(lib, terr, tiles.tolist(), start, T + 2 * gen.cfg.fut)
-    env, cmd, obs = student_env(lib, n, a.seed * 1000 + rd, True, env_kw, dev)
-    L = cmd.library
-    origins = env.scene.env_origins
+    env, cmd, obs = student_env(lib, n, seed, True, env_kw, dev)
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(dev)
+    return env, cmd, obs, scan, tiles, env.scene.env_origins
+
+
+def close_round(env, lib: Path) -> None:
+    env.close()
+    for f in (lib, terrains_path(lib)):
+        f.unlink(missing_ok=True)
+
+
+def replan(gen, diff, cmd, buf, joy, scan, tiles, g) -> None:
+    """As closed_loop.run_loop: a plan from each robot's recent motion (buf (n, >= hist, 25)), the heightmap and the
+    joystick, written into the library after each env's current frame (the teacher's goal)."""
+    n, dev, H = len(buf), buf.device, gen.cfg.hist
+    cur = buf[:, -1]
+    origin, yaw0 = cur[:, :3], heading_yaw(cur[:, 3:7])
+    h = buf[:, -H:]
+    hist = to_canonical(h[..., :3], h[..., 3:7], h[..., 7:], origin, yaw0)
+    s49 = torch.zeros(n, 49, device=dev)
+    s49[:, :7] = cur[:, :7]
+    hmap = (scan(s49, tiles) - origin[:, 2:3]).reshape(n, *GRID_SHAPE)
+    cpath = command_path(buf, joy, VEL_HALFLIFE)
+    nm = gen.norm
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        x = diff.sample(gen, nm.frames(hist), nm.hmap(hmap), nm.cmd(cpath), torch.ones(n, device=dev), steps=20, guidance=1.0, generator=g).float()
+    pos, quat, q = from_canonical(nm.frames_inv(x), origin, yaw0)
+    frames = with_velocities(cur, torch.cat([pos, quat, q], -1))
+    idx = cmd.frame[:, None] + torch.arange(1, frames.shape[1] + 1, device=dev)
+    L = cmd.library
+    L._ref[idx.reshape(-1)] = frames.reshape(-1, 49).to(L._ref.dtype)
+
+
+def still_up(now, scan, tiles) -> torch.Tensor:
+    """now (n, 25) robot frames -> (n,) root more than DOWN_HEIGHT above the ground and tilted less than 60 deg."""
+    above = now[:, 2] - scan.lookup(now[:, :1], now[:, 1:2], tiles)[:, 0]
+    qx, qy = now[:, 4], now[:, 5]
+    return (above > DOWN_HEIGHT) & (1 - 2 * (qx**2 + qy**2) > DOWN_UP_Z)  # world z of the torso's up axis
+
+
+@torch.no_grad()
+def collect(gen, diff, teacher, env_kw, student: Student, beta: float, rng, st, a, rd: int, dev: str):
+    """One round: -> data (P, D, A, alive) and stats."""
+    n, T = a.envs, int(a.seconds * 50)
+    sc, sched = sample_scenes(rng, a, n, T)
+    sched = torch.as_tensor(sched, device=dev)
+    lib = Path(a.run) / "round_library.pt"
+    env, cmd, obs, scan, tiles, origins = open_round(sc, st, gen, env_kw, lib, T, a.seed * 1000 + rd, dev)
     H = gen.cfg.hist
     buf = robot_frame(cmd, origins)[:, None].repeat(1, max(H, REPLAN + 1), 1)
     g = torch.Generator(device=dev).manual_seed(a.seed * 1000 + rd)
@@ -128,23 +173,9 @@ def collect(gen, diff, teacher, env_kw, student: Student, beta: float, rng, st, 
     t_plan = 0.0
     for t in range(T):
         joy = operator(buf, sched[:, t, :3], sched[:, t, 3])
-        if t % REPLAN == 0:  # as closed_loop.run_loop
+        if t % REPLAN == 0:
             t0 = time.perf_counter()
-            cur = buf[:, -1]
-            origin, yaw0 = cur[:, :3], heading_yaw(cur[:, 3:7])
-            h = buf[:, -H:]
-            hist = to_canonical(h[..., :3], h[..., 3:7], h[..., 7:], origin, yaw0)
-            s49 = torch.zeros(n, 49, device=dev)
-            s49[:, :7] = cur[:, :7]
-            hmap = (scan(s49, tiles) - origin[:, 2:3]).reshape(n, *GRID_SHAPE)
-            cpath = command_path(buf, joy, VEL_HALFLIFE)
-            nm = gen.norm
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                x = diff.sample(gen, nm.frames(hist), nm.hmap(hmap), nm.cmd(cpath), torch.ones(n, device=dev), steps=20, guidance=1.0, generator=g).float()
-            pos, quat, q = from_canonical(nm.frames_inv(x), origin, yaw0)
-            frames = with_velocities(cur, torch.cat([pos, quat, q], -1))
-            idx = cmd.frame[:, None] + torch.arange(1, frames.shape[1] + 1, device=dev)
-            L._ref[idx.reshape(-1)] = frames.reshape(-1, 49).to(L._ref.dtype)
+            replan(gen, diff, cmd, buf, joy, scan, tiles, g)
             t_plan += time.perf_counter() - t0
         a_t = teacher(obs["policy"], obs["goal"])
         depth = (obs["depth"] * 255).round()
@@ -158,12 +189,8 @@ def collect(gen, diff, teacher, env_kw, student: Student, beta: float, rng, st, 
         obs, *_ = env.step(torch.where(use_teacher[:, None], a_t, a_s))
         now = robot_frame(cmd, origins)
         buf = torch.cat([buf[:, 1:], now[:, None]], 1)
-        above = now[:, 2] - scan.lookup(now[:, :1], now[:, 1:2], tiles)[:, 0]
-        qx, qy = now[:, 4], now[:, 5]
-        up &= (above > DOWN_HEIGHT) & (1 - 2 * (qx**2 + qy**2) > DOWN_UP_Z)  # world z of the torso's up axis
-    env.close()
-    for f in (lib, terrains_path(lib)):
-        f.unlink(missing_ok=True)
+        up &= still_up(now, scan, tiles)
+    close_round(env, lib)
     fam = np.array([s[0] for s in sc])
     past = np.array([np.nan if s[5] is None else s[5] for s in sc])
     end_x = buf[:, -1, 0].cpu().numpy()

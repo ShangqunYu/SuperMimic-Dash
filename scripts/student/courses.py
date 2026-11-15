@@ -20,6 +20,9 @@ DX, X0, X1, Y0, Y1 = 0.04, -1.0, 27.0, -2.0, 2.0
 SEG = (2.0, 4.0)
 FEATURES = {"stairs_up": 0.17, "stairs_down": 0.13, "box": 0.14, "platform_up": 0.1, "platform_down": 0.08, "rough": 0.16, "slope_up": 0.08,
             "slope_down": 0.06, "gap": 0.08}
+RISE = (0.08, 0.19)  # m, stair riser
+TALL_RISE, TALL_SHARE = (0.15, 0.19), 0.0  # a share of the stairs drawn from TALL_RISE instead (rl_finetune.py --tall-stairs)
+GAP = (0.1, 0.4)  # m, gap width (rl_finetune.py --gap-max)
 
 
 def grid(x0=X0, x1=X1, y0=Y0, y1=Y1, dx=DX):
@@ -31,7 +34,8 @@ def grid(x0=X0, x1=X1, y0=Y0, y1=Y1, dx=DX):
 def _feature(rng, kind: str, X, Y, x0: float, level: float):
     """-> heightfield increment over the feature's extent (added where X >= x0), its end x, the level after it."""
     if kind in ("stairs_up", "stairs_down"):
-        r, t, n = rng.uniform(0.08, 0.19), rng.uniform(0.24, 0.36), int(rng.integers(3, 9))
+        r = rng.uniform(*TALL_RISE) if TALL_SHARE and rng.random() < TALL_SHARE else rng.uniform(*RISE)  # no extra draw at 0
+        t, n = rng.uniform(0.24, 0.36), int(rng.integers(3, 9))
         k = np.clip(np.floor((X - x0) / t) + 1, 0, n)
         d = k * r if kind == "stairs_up" else -k * r
         return d, x0 + n * t, level + (n * r if kind == "stairs_up" else -n * r)
@@ -51,7 +55,7 @@ def _feature(rng, kind: str, X, Y, x0: float, level: float):
         g, length = np.tan(np.radians(rng.uniform(5.0, 15.0))), rng.uniform(1.5, 3.0)
         d = np.clip(X - x0, 0, length) * g * (1 if kind == "slope_up" else -1)
         return d, x0 + length, level + length * g * (1 if kind == "slope_up" else -1)
-    w = rng.uniform(0.1, 0.4)  # gap
+    w = rng.uniform(*GAP)  # gap
     return np.where((X >= x0) & (X < x0 + w), -1.0, 0.0), x0 + w, level
 
 
