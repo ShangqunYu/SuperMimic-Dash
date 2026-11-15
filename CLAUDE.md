@@ -971,6 +971,19 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   latency 10, no noise / dropouts 8, neither 21 (no DR at all 36; generator + teacher DR 37, clean 45). So the
   student loses more than the teacher to the robot DR (36 -> 21 vs 45 -> 37), and the depth noise and latency
   compound (either alone off recovers little).
+- **RL fine-tuning** (user's decision 2026-11-15: keep the 80-140 ms / 10 Hz depth, PPO with a DAgger term that
+  decays; as PHP, arXiv 2602.15827: 60-80 ms delay, 30 Hz depth, lam_D max(0.1, 1 - k / (K/2)), DAgger coef 10,
+  lr fixed then KL-adaptive). `scripts/student/rl_finetune.py`: dagger.py's rounds (no resets, done once down) with
+  the student acting everywhere (Gaussian, learned std from 0.1), reward = the env's tracking reward against the
+  generator's plan (the teacher's Table A.2 terms, x dt: ~0.085 / step of 0.1 max), critic an MLP on the teacher's
+  inputs (policy history + goal + scan, 1523). Pitfalls found in smoke tests: StudentRunner caches each depth
+  frame's CNN token for 2 s, so after an actor update the acting policy used stale tokens (first-minibatch
+  |ratio - 1| 0.04-0.12; fixed by re-encoding the window after each update, plus cudnn TF32 off: 0.016); PPO at a
+  fixed 5e-5 moves the policy to KL ~0.2 per update at std 0.1 (clip fraction 0.6), hence the adaptive lr from
+  update 150, bounded 5e-6..1e-4. Update cost: the transformer, not the CNN (3.2 s per update of 2048 x 24 steps,
+  5 epochs x 4 env-grouped minibatches). **rl_v1** (GPU 0, from v4 r30, seed 4): v4's mix (`--courses
+  --course-share 0.5`, v2 families) with `--vmax 2.5 --tall-stairs 0.5 --gap-max 0.5`, 100 rounds, critic-only
+  rounds 0-2, lam_D to 0.1 by round 53; log `logs/student_rl_v1.out`, run `logs/student/rl_v1/`.
 
 ## PARC terrain data (2026-11-08, lab server)
 
