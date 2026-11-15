@@ -966,7 +966,11 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   17 / 18 cm risers (`--rises 0.17 0.18`, `logs/course_demo/tall_*`), of 64 at 1.5 / 2.0 / 2.5 m/s: generator +
   teacher clean 59 / 45 / 56, DR 48 / 37 / 29; student clean 51 / 36 / 22, DR 25 / 5 / 0. The added falls are
   nearly all on the stairs up. The DR student trips at the 1st-2nd riser (x 1.7-2.1 m, 1.3-1.4 s in, still
-  accelerating), the clean one at the 3rd-4th.
+  accelerating), the clean one at the 3rd-4th. Depth ablation at 2 m/s on 17 / 18 cm, student `--dr` with one part
+  of the depth corruption off (scratchpad `depth_ablation.py`, `logs/course_demo/abl_*`), of 64: all on 5, no
+  latency 10, no noise / dropouts 8, neither 21 (no DR at all 36; generator + teacher DR 37, clean 45). So the
+  student loses more than the teacher to the robot DR (36 -> 21 vs 45 -> 37), and the depth noise and latency
+  compound (either alone off recovers little).
 
 ## PARC terrain data (2026-11-08, lab server)
 
