@@ -932,6 +932,28 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   so +-5-10 per 120 between runs; compare on 3 seeds and treat < ~10 / 360 as a tie.
 - **CPU** (eager PyTorch, this Threadripper 9960X, one robot): transformer 1.4 ms + depth encode 0.6 ms every 5th step
   at 1 thread (0.9 + 0.5 ms at 4). The UP Xtreme's i7 is slower per core, but the 20 ms step leaves a wide margin.
+- **Speed (2026-11-15).** The v2 student crawled in the videos because its commands did (terrain vx <= 1 m/s); the
+  generator + teacher cross the scenes at 1.3-2 m/s (scratchpad `speed_probe.py`). **`dagger.py --courses`**
+  (`scripts/student/courses.py`): 28 m courses of 1-4 features in a row (stairs, box, platform, rough blocks, slopes,
+  gaps up to 40 cm), joystick vx 0.3-2 m/s (half the segments >= 1 m/s), 20% flat. **Fast suite** (`eval_student.py
+  --suite fast`, `courses.fast_scenes`): the terrain scenes at 1.5 m/s plus unseen rough blocks 0-6/12/20 cm, slopes
+  10/15 deg, gaps 20/40 cm, 7 s; success = past the line, never tilted past 60 deg, standing at the end.
+- **dagger_v3** (`--courses`, init v2 round 25, beta0 0.25, seed 2, 30 rounds). 3 seeds, slow suite (of 360) / fast
+  suite (of 480): v2 r25 292 / 266; v3 r15 228 / 406, **r20 265 / 403**, r25 249 / 405, r30 256 / 402. Fast scenes
+  crossed at 1.1-1.8 m/s. Lost on the slow suite: stairs down 10 / 14 cm at 0.5 m/s 24 / 24 -> 17 / 9 (rushes down in a
+  deep crouch, root 0.22-0.39 m above the ground, below the 0.4 rule), sidestep 22 -> 15, stairs up 18 cm 15 -> 11;
+  gained platform up 30 cm 11 -> 16. **dagger_v4** (GPU 0, started 2026-11-15 ~12:50): `--courses --course-share 0.5`
+  (half the envs on courses, half on v2's families at <= 1 m/s), init v3 r20, beta0 0.25, seed 3, 30 rounds; log
+  `logs/student_dagger_v4.out`.
+- **Course demo** (`scripts/generator/course_demo.py`, generator + v6 teacher, clean physics unless `--dr`): a 2 m wide
+  course of 5 stairs up (10 / 14 cm) onto a deck, a 30 / 50 cm gap in the deck, a 20 / 30 cm platform up, stairs down
+  (<= 15 cm), run-out; joystick vx held. 8 variants x 8 runs, success (whole course, never down) / mean speed over the
+  course: 1.5 m/s 62 / 64 @ 1.5; 2.0 m/s 62 / 64 @ 1.9; 2.5 m/s 63 / 64 @ 2.3; 3.0 m/s 60 / 64 @ 2.7 (the 14 cm / 50 cm
+  / 30 cm variant 8 / 8 @ 2.66, best 2.76). At 1.0 m/s most runs do not finish in 10 s and some stall or fall at the
+  gap (a 50 cm gap needs a stride from speed). With robot + hardware DR, obs noise and the 0-25 ms delay: 1.5 / 2.0 /
+  2.5 m/s 51 / 47 / 41 of 64 (falls spread over stairs up, stairs down and the 30 cm platform). Videos (1080p,
+  `--render --pick V S K [--ghost]`): `logs/course_demo/clean/course_v7_2.0ms_6.mp4`,
+  `logs/course_demo/fast/course_v7_3.0ms_7{,_ghost}.mp4`.
 
 ## PARC terrain data (2026-11-08, lab server)
 

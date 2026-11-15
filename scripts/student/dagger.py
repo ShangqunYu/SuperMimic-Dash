@@ -2,7 +2,7 @@
 
   python scripts/student/dagger.py gen_ckpt teacher_ckpt run_dir [--envs 2048] [--rounds 40] [--seconds 12]
       [--iters 1500] [--batch 1024] [--keep 12] [--eval-every 5] [--seed 0] [--resume] [--families flat=0.35,...]
-      [--courses [--flat-share 0.2] [--vmax 2.0]] [--init student_ckpt --beta0 0.25]
+      [--courses [--course-share 1.0] [--flat-share 0.2] [--vmax 2.0]] [--init student_ckpt --beta0 0.25]
 
 Each round: --envs robots on augment.py's random terrains (stairs up / down, a box, a platform up / down, flat)
 with its varying joystick (command_schedule), in the student's training conditions (observation noise with the
@@ -17,7 +17,8 @@ Stored per step: the student's inputs (proprio group + joystick; the depth frame
 teacher's action; the last --keep rounds are trained on (MSE to the teacher's action, windows ending at any live
 step). Every --eval-every rounds: eval_student.evaluate on the 15 scenes (noisy). Writes run_dir/ckpt_XXX.pt,
 ckpt_latest.pt and log.jsonl. --courses: courses.py's obstacle courses at up to 2 m/s instead of augment.py's
-single features at up to 1 m/s; the evals then add the fast suite (eval_student --suite fast).
+single features at up to 1 m/s; the evals then add the fast suite (eval_student --suite fast). --course-share S
+mixes the two: courses in a share S of the envs, augment.py's slow scenes (--families) in the rest.
 """
 
 from __future__ import annotations
@@ -86,9 +87,18 @@ class Replay:
 def collect(gen, diff, teacher, env_kw, student: Student, beta: float, rng, st, a, rd: int, dev: str):
     """One round: -> data (P, D, A, alive) and stats."""
     n, T = a.envs, int(a.seconds * 50)
-    if a.courses:
-        sc = [sample_course(rng, a.flat_share) for _ in range(n)]
-        sched = np.stack([course_schedule(rng, s[0] == "flat", T, a.sidestep, a.vmax) for s in sc])
+    if a.courses:  # a share --course-share of courses (families "fast_*" when mixed), the rest augment.py's scenes
+        sc, sched = [], []
+        for _ in range(n):
+            if a.course_share >= 1 or rng.random() < a.course_share:
+                s = sample_course(rng, a.flat_share)
+                sched.append(course_schedule(rng, s[0] == "flat", T, a.sidestep, a.vmax))
+                sc.append(s if a.course_share >= 1 else (f"fast_{s[0]}", *s[1:]))
+            else:
+                s = sample_scene(rng)
+                sched.append(command_schedule(rng, s[0], T, a.sidestep))
+                sc.append(s)
+        sched = np.stack(sched)
     else:
         sc = [sample_scene(rng) for _ in range(n)]
         sched = np.stack([command_schedule(rng, s[0], T, a.sidestep) for s in sc])
@@ -208,7 +218,9 @@ def main():
     ap.add_argument("--sidestep", type=float, default=0.15, help="flat: share of joystick segments that are pure sidesteps")
     ap.add_argument("--families", default=None, help="terrain family weights as augment.py's, e.g. flat=0.35,stairs_up=0.2 (others 0)")
     ap.add_argument("--courses", action="store_true", help="courses.py obstacle courses (1-4 features in a row) and its fast joystick")
-    ap.add_argument("--flat-share", type=float, default=0.2, help="--courses: share of flat envs")
+    ap.add_argument("--course-share", type=float, default=1.0, help="--courses: share of envs on courses; the rest on augment.py's single "
+                    "features at up to 1 m/s (--families)")
+    ap.add_argument("--flat-share", type=float, default=0.2, help="--courses: share of flat envs among the courses")
     ap.add_argument("--vmax", type=float, default=2.0, help="--courses: top joystick vx (m/s)")
     ap.add_argument("--init", default=None, help="student checkpoint to start from (its input normalization is kept)")
     ap.add_argument("--beta0", type=float, default=1.0, help="share of envs the teacher drives in round 0 (then x beta-decay per round)")
