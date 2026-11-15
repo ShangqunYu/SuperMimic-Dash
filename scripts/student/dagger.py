@@ -2,6 +2,7 @@
 
   python scripts/student/dagger.py gen_ckpt teacher_ckpt run_dir [--envs 2048] [--rounds 40] [--seconds 12]
       [--iters 1500] [--batch 1024] [--keep 12] [--eval-every 5] [--seed 0] [--resume] [--families flat=0.35,...]
+      [--courses [--flat-share 0.2] [--vmax 2.0]] [--init student_ckpt --beta0 0.25]
 
 Each round: --envs robots on augment.py's random terrains (stairs up / down, a box, a platform up / down, flat)
 with its varying joystick (command_schedule), in the student's training conditions (observation noise with the
@@ -15,7 +16,8 @@ within 0.3 m of the ground or tilted past 60 deg; there are no resets within a r
 Stored per step: the student's inputs (proprio group + joystick; the depth frame every 5th step, as uint8) and the
 teacher's action; the last --keep rounds are trained on (MSE to the teacher's action, windows ending at any live
 step). Every --eval-every rounds: eval_student.evaluate on the 15 scenes (noisy). Writes run_dir/ckpt_XXX.pt,
-ckpt_latest.pt and log.jsonl.
+ckpt_latest.pt and log.jsonl. --courses: courses.py's obstacle courses at up to 2 m/s instead of augment.py's
+single features at up to 1 m/s; the evals then add the fast suite (eval_student --suite fast).
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts/generator"))
 sys.path.insert(0, str(REPO / "scripts/student"))
 from augment import FAMILIES, command_schedule, sample_scene  # noqa: E402
+from courses import course_schedule, sample_course  # noqa: E402
 from closed_loop import build_library, with_velocities  # noqa: E402
 from eval_student import evaluate, robot_frame, student_env  # noqa: E402
 from rollout_generator import REPLAN, VEL_HALFLIFE, command_path, first_library, load, operator, standing_frame  # noqa: E402
@@ -83,12 +86,17 @@ class Replay:
 def collect(gen, diff, teacher, env_kw, student: Student, beta: float, rng, st, a, rd: int, dev: str):
     """One round: -> data (P, D, A, alive) and stats."""
     n, T = a.envs, int(a.seconds * 50)
-    sc = [sample_scene(rng) for _ in range(n)]
+    if a.courses:
+        sc = [sample_course(rng, a.flat_share) for _ in range(n)]
+        sched = np.stack([course_schedule(rng, s[0] == "flat", T, a.sidestep, a.vmax) for s in sc])
+    else:
+        sc = [sample_scene(rng) for _ in range(n)]
+        sched = np.stack([command_schedule(rng, s[0], T, a.sidestep) for s in sc])
+    sched = torch.as_tensor(sched, device=dev)
     terr = [s[2] for s in sc]
     tiles = torch.arange(n, device=dev)
     start = st.repeat(n, 1)
     start[:, 2] += torch.tensor([s[3] for s in sc], device=dev)
-    sched = torch.as_tensor(np.stack([command_schedule(rng, s[0], T, a.sidestep) for s in sc]), device=dev)
     lib = Path(a.run) / "round_library.pt"
     build_library(lib, terr, tiles.tolist(), start, T + 2 * gen.cfg.fut)
     env, cmd, obs = student_env(lib, n, a.seed * 1000 + rd, True, env_kw, dev)
@@ -196,9 +204,14 @@ def main():
     ap.add_argument("--keep", type=int, default=12, help="rounds kept for training")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--warmup", type=int, default=500)
-    ap.add_argument("--beta-decay", type=float, default=0.5, help="share of envs the teacher drives: decay^round")
+    ap.add_argument("--beta-decay", type=float, default=0.5, help="share of envs the teacher drives: beta0 x decay^round")
     ap.add_argument("--sidestep", type=float, default=0.15, help="flat: share of joystick segments that are pure sidesteps")
     ap.add_argument("--families", default=None, help="terrain family weights as augment.py's, e.g. flat=0.35,stairs_up=0.2 (others 0)")
+    ap.add_argument("--courses", action="store_true", help="courses.py obstacle courses (1-4 features in a row) and its fast joystick")
+    ap.add_argument("--flat-share", type=float, default=0.2, help="--courses: share of flat envs")
+    ap.add_argument("--vmax", type=float, default=2.0, help="--courses: top joystick vx (m/s)")
+    ap.add_argument("--init", default=None, help="student checkpoint to start from (its input normalization is kept)")
+    ap.add_argument("--beta0", type=float, default=1.0, help="share of envs the teacher drives in round 0 (then x beta-decay per round)")
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", action="store_true")
@@ -222,6 +235,9 @@ def main():
     T = int(a.seconds * 50)
     replay = Replay(a.keep, a.envs, T, cfg, dev)
     rd0, step = 0, 0
+    if a.init:
+        student.load_state_dict(torch.load(a.init, map_location=dev, weights_only=False)["model"])
+        print(f"initialized from {a.init}", flush=True)
     if a.resume and (run / "ckpt_latest.pt").exists():
         ck = torch.load(run / "ckpt_latest.pt", map_location=dev, weights_only=False)
         student.load_state_dict(ck["model"])
@@ -232,9 +248,9 @@ def main():
     print(f"student: {sum(p.numel() for p in student.parameters()) / 1e6:.2f} M parameters", flush=True)
     for rd in range(rd0, a.rounds):
         t0 = time.perf_counter()
-        beta = 1.0 if rd == 0 else a.beta_decay**rd
+        beta = a.beta0 * a.beta_decay**rd
         data, stats = collect(gen, diff, teacher, env_kw, student, beta, rng, st, a, rd, dev)
-        if rd == 0 and not a.resume:
+        if rd == 0 and not a.resume and not a.init:
             student.set_normalization(data["P"][data["alive"]])
         replay.add(data)
         del data
@@ -250,6 +266,9 @@ def main():
             res, total, n_ev = evaluate(student, run / "eval", st, env_kw, seed=rd, dev=dev)
             rec["eval"] = f"{total}/{n_ev}"
             rec["eval_scenes"] = {k: v["success"] for k, v in res.items()}
+            res, total, n_ev = evaluate(student, run / "eval_fast", st, env_kw, seed=rd, dev=dev, suite="fast")
+            rec["eval_fast"] = f"{total}/{n_ev}"
+            rec["eval_fast_scenes"] = {k: f"{v['success']} @ {v['crossing_m_s']}" for k, v in res.items()}
             rec["eval_s"] = round(time.perf_counter() - t2)
         with open(run / "log.jsonl", "a") as f:
             f.write(json.dumps(rec) + "\n")

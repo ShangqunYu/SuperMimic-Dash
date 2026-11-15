@@ -3,6 +3,10 @@ actions out, no generator or teacher. Scored as the generator + teacher loop (ro
 numbers compare with closed_loop.py's (gen_v6 + v6 teacher: 310 / 360 clean, 294-296 with DR + delay).
 
   python scripts/student/eval_student.py student_ckpt out_dir [--samples 8] [--seconds 12] [--seed 0] [--clean] [--render]
+      [--suite fast]
+
+--suite fast (courses.fast_scenes): the 11 terrain scenes and 7 unseen rough ones (blocks, slopes, gaps) at 1.5 m/s
+for 7 s, scored by courses.fast_score (past the line, upright, standing at the end) with the crossing speed.
 
 Default conditions are the student's training ones: observation noise (with the depth's noise, dropouts and
 latency), robot + hardware + camera DR and the 0-25 ms actuator delay; --clean turns all of that off.
@@ -25,6 +29,9 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts/generator"))
 from closed_loop import build_library, render_all  # noqa: E402
 from rollout_generator import DX, X0, Y0, operator, scenes, score  # noqa: E402
+
+sys.path.insert(0, str(REPO / "scripts/student"))
+from courses import fast_scenes, fast_score  # noqa: E402
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env  # noqa: E402
 from supermimic.generator.data import GEN_GRID  # noqa: E402
@@ -56,11 +63,13 @@ def robot_frame(cmd, origins) -> torch.Tensor:
 
 @torch.no_grad()
 def evaluate(student: Student, out: Path, start: torch.Tensor, env_kw: dict, samples: int = 8, seconds: float = 12.0, seed: int = 0,
-             noisy: bool = True, render: bool = False, dev: str = "cuda:0") -> tuple[dict, int, int]:
-    """start (25,): the standing frame (root at x = y = 0, yaw 0); env_kw: student_env's. -> per-scene results,
-    successes, runs."""
+             noisy: bool = True, render: bool = False, dev: str = "cuda:0", suite: str = "standard") -> tuple[dict, int, int]:
+    """start (25,): the standing frame (root at x = y = 0, yaw 0); env_kw: student_env's; suite: standard (the 15
+    scenes) or fast (fast_scenes, 7 s). -> per-scene results, successes, runs."""
     out.mkdir(parents=True, exist_ok=True)
-    sc = scenes()
+    fast = suite == "fast"
+    sc = fast_scenes(1.5) if fast else scenes()
+    seconds = 7.0 if fast else seconds
     terr = [Terrain(s.hf, np.array([X0, Y0]), DX) for s in sc]
     S = samples
     n = len(sc) * S
@@ -87,8 +96,11 @@ def evaluate(student: Student, out: Path, start: torch.Tensor, env_kw: dict, sam
         f.unlink(missing_ok=True)
     Q = torch.stack(Q, 1)
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(dev)
-    with contextlib.redirect_stdout(io.StringIO()):  # score prints every scene's details; results.json has them
-        res, total = score(sc, terr, Q, tiles, FootMetrics(scan, dev), S)
+    if fast:
+        res, total = fast_score(sc, terr, Q, tiles, scan, S)
+    else:
+        with contextlib.redirect_stdout(io.StringIO()):  # score prints every scene's details; results.json has them
+            res, total = score(sc, terr, Q, tiles, FootMetrics(scan, dev), S)
     torch.save({"robot": Q.cpu(), "scenes": [s.name for s in sc], "samples": S}, out / "traj.pt")
     if render:
         hidden = Q[::S].clone()
@@ -106,13 +118,16 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--clean", action="store_true", help="no noise, latency, DR or delay")
     ap.add_argument("--render", action="store_true")
+    ap.add_argument("--suite", default="standard", choices=["standard", "fast"])
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
     ck = torch.load(a.student, map_location="cpu", weights_only=False)
     student = load_student(a.student, a.device)
-    res, total, n = evaluate(student, Path(a.out), ck["start"].to(a.device), ck["env_kwargs"], a.samples, a.seconds, a.seed, not a.clean, a.render, a.device)
+    res, total, n = evaluate(student, Path(a.out), ck["start"].to(a.device), ck["env_kwargs"], a.samples, a.seconds, a.seed, not a.clean, a.render, a.device,
+                             a.suite)
     print(f"success {total}/{n}")
-    (Path(a.out) / "results.json").write_text(json.dumps({"student": a.student, "noisy": not a.clean, "seed": a.seed, "success": f"{total}/{n}", "scenes": res}, indent=1))
+    (Path(a.out) / "results.json").write_text(json.dumps({"student": a.student, "suite": a.suite, "noisy": not a.clean, "seed": a.seed, "success": f"{total}/{n}",
+                                                         "scenes": res}, indent=1))
 
 
 if __name__ == "__main__":
