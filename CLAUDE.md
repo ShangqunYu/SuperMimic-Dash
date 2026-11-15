@@ -859,6 +859,11 @@ to run the final student.
   and is slowest), not the operator's heading hold (wz 0 or reversed changes nothing), not the scene edge (lookups
   clamp: flat). The aug models also yaw 6-9 deg into the sidestep (gen_v6 2-3). Any physics-aug fine-tune so far gains
   platform up / box / turn and loses the sidestep. **Best generator now: gen_v6 40k at half-life 0.1 (310 / 360).**
+- **gen_v6 under the teacher's training randomization** (`closed_loop.py --dr`: robot + hardware DR, observation
+  noise, no action noise; `--delay`: 0-25 ms actuator delay, which the v6 teacher never trained with), 3 seeds:
+  310 -> 294 (dr) / 296 (dr + delay); the delay costs nothing beyond DR. The loss is stairs up 18 cm (22 -> 10 / 9 of
+  24): mostly slower climbing (end x 2.5-3.1 m vs 3.2-3.4 m, the scene's line is 3.0 m), 3-4 of 24 not reaching the
+  top. Every other scene is within noise.
 - **GenData takes several libraries** (terrains appended, tiles offset; `--library A B`) and `terrain_share` (each
   library's share of the terrain windows; `--terrain-share 0.5 0.5`); `--init ckpt` warm-starts model + EMA.
 - **`--terrain-balance B`**: terrain windows weighted by (windows of their skill)^-B (0.5: box jump-over 7.9 -> 9.9%

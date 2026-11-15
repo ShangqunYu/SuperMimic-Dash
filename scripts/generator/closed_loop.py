@@ -62,11 +62,12 @@ def with_velocities(cur: torch.Tensor, plan: torch.Tensor) -> torch.Tensor:
 
 
 def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: float, workdir: Path, dev: str, steps: int = 20, guidance: float = 1.0,
-             seed: int = 0, replan: int = REPLAN, halflife: float = VEL_HALFLIFE):
+             seed: int = 0, replan: int = REPLAN, halflife: float = VEL_HALFLIFE, dr: bool = False, delay: bool = False):
     """Generator + teacher in physics. terr: list of Terrain; tiles (n,) each env's terrain; start (n, 25) its start
     pose; cmd_v (n, 3) its joystick command (operator heading hold to yaw 0 applies), or a schedule (n, T, 4) per
     step: vx, vy, wz, the heading held where wz is 0. replan: frames between plans; halflife: the command path's
-    velocity spring (rollout_generator.command_path). -> robot frames Q (n, T, 25), the
+    velocity spring (rollout_generator.command_path); dr: the teacher's training randomization (robot DR, hardware DR, observation
+    noise; no action noise, as deployed); delay: actuator command delay (0-25 ms). -> robot frames Q (n, T, 25), the
     tracked plan frame R (n, T, 25), robot velocities V (n, T, 6 + NJ) [root lin vel w, root ang vel w, joint vel]."""
     n = len(tiles)
     T = int(seconds * 50)
@@ -75,7 +76,8 @@ def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: floa
     load_terrains.cache_clear()  # cached by path: a rebuilt library must not reuse an earlier call's terrains
     policy, pcfg = load_policy_from_checkpoint(teacher, dev)
     env = make_env(SuperMimicEnvCfgArgs(npz_files=[str(lib)], robot="dash", num_envs=n, compact_library=True, **goal_env_kwargs(pcfg),
-                                        episode_length_s=1e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
+                                        episode_length_s=1e5, action_noise_std=0.0, obs_noise=dr, reset_noise=False, domain_randomization=dr, hardware_dr=dr,
+                                        command_delay=delay,
                                         sampling_mode="start", seed=seed, root_height_threshold=1e3, root_tilt_threshold=1e3, record_transitions=False),
                    device=dev)
     cmd = env.command_manager.get_term("motion")
@@ -138,6 +140,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0, help="generator sampling and sim seed")
     ap.add_argument("--replan", type=int, default=REPLAN, help="frames between plans")
     ap.add_argument("--halflife", type=float, default=VEL_HALFLIFE, help="s, the command path's velocity spring")
+    ap.add_argument("--dr", action="store_true", help="the teacher's training randomization (robot + hardware DR, observation noise)")
+    ap.add_argument("--delay", action="store_true", help="actuator command delay, 0-25 ms")
     a = ap.parse_args()
     dev = a.device
     out = Path(a.out)
@@ -153,14 +157,14 @@ def main():
     start[:, 2] += torch.as_tensor(np.array([t.h(np.zeros(2)) for t in terr]), dtype=torch.float32, device=dev).repeat_interleave(S)
     cmd_v = torch.as_tensor(np.array([s.cmd for s in sc]), dtype=torch.float32, device=dev).repeat_interleave(S, 0)
     Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, steps=a.steps, guidance=a.guidance, seed=a.seed,
-                       replan=a.replan, halflife=a.halflife)
+                       replan=a.replan, halflife=a.halflife, dr=a.dr, delay=a.delay)
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(dev)
     feet = FootMetrics(scan, dev)
     res, total = score(sc, terr, Q, tiles, feet, S)
     off = (Q[..., :2] - R[..., :2]).norm(dim=-1)
     for k, s in enumerate(sc):
         res[s.name]["robot_vs_plan_xy_max_m"] = off[k * S : (k + 1) * S].amax(1).cpu().numpy().round(2).tolist()
-    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "step": ck["step"], "guidance": a.guidance, "replan": a.replan, "halflife": a.halflife, "success": f"{total}/{n}", "scenes": res}, indent=1))
+    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "step": ck["step"], "guidance": a.guidance, "replan": a.replan, "halflife": a.halflife, "dr": a.dr, "delay": a.delay, "success": f"{total}/{n}", "scenes": res}, indent=1))
     torch.save({"robot": Q.cpu(), "plan": R.cpu(), "scenes": [s.name for s in sc], "samples": S}, out / "traj.pt")
     if a.render:
         render_all(sc, terr, Q[::S].cpu().numpy(), R[::S].cpu().numpy(), out)
