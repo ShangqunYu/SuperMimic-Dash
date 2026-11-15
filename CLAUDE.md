@@ -942,9 +942,12 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   suite (of 480): v2 r25 292 / 266; v3 r15 228 / 406, **r20 265 / 403**, r25 249 / 405, r30 256 / 402. Fast scenes
   crossed at 1.1-1.8 m/s. Lost on the slow suite: stairs down 10 / 14 cm at 0.5 m/s 24 / 24 -> 17 / 9 (rushes down in a
   deep crouch, root 0.22-0.39 m above the ground, below the 0.4 rule), sidestep 22 -> 15, stairs up 18 cm 15 -> 11;
-  gained platform up 30 cm 11 -> 16. **dagger_v4** (GPU 0, started 2026-11-15 ~12:50): `--courses --course-share 0.5`
+  gained platform up 30 cm 11 -> 16. **dagger_v4** (2026-11-15 12:50-14:20, GPU 0): `--courses --course-share 0.5`
   (half the envs on courses, half on v2's families at <= 1 m/s), init v3 r20, beta0 0.25, seed 3, 30 rounds; log
-  `logs/student_dagger_v4.out`.
+  `logs/student_dagger_v4.out`. 3 seeds, slow / fast: r15 281 / 402, r20 285 / 403, r25 281 / 379, **r30 296 / 397**
+  (v2 292 / 266, v3 403 at best): slow stairs down back to 24 / 23 of 24, platform up 30 cm 20 (best yet). Weak spots
+  left: stairs up 18 cm (slow 14, fast 4 of 24), rough blocks 0-20 cm 11, platform up 50 cm 0 (beyond the data).
+  **Best student: `logs/student/dagger_v4/ckpt_029.pt`.**
 - **Course demo** (`scripts/generator/course_demo.py`, generator + v6 teacher, clean physics unless `--dr`): a 2 m wide
   course of 5 stairs up (10 / 14 cm) onto a deck, a 30 / 50 cm gap in the deck, a 20 / 30 cm platform up, stairs down
   (<= 15 cm), run-out; joystick vx held. 8 variants x 8 runs, success (whole course, never down) / mean speed over the
@@ -954,6 +957,12 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   2.5 m/s 51 / 47 / 41 of 64 (falls spread over stairs up, stairs down and the 30 cm platform). Videos (1080p,
   `--render --pick V S K [--ghost]`): `logs/course_demo/clean/course_v7_2.0ms_6.mp4`,
   `logs/course_demo/fast/course_v7_3.0ms_7{,_ghost}.mp4`.
+  The v4 r30 student alone (`--student ckpt`; with `--dr` also the depth noise, dropouts, latency and camera DR), of 64
+  at 1.5 / 2.0 / 2.5 m/s: clean 38 / 49 / 41, DR 33 / 24 / 3 (generator + teacher: 62 / 62 / 63, DR 51 / 47 / 41).
+  Clean failures are mostly at the gap: 50 cm is wider than its training gaps (<= 40 cm) and here the gap is in a
+  raised deck; at 1.5 m/s the 50 cm gap fails more (no run-up). Under DR at 2.5 m/s (beyond its 2 m/s training
+  joystick) it falls on the stairs up. Videos: `logs/course_demo/student_v4_clean/course_v7_2.0ms_1.mp4` (14 / 50 /
+  30 cm, 1.92 m/s), `logs/course_demo/student_v4_dr/course_v4_2.0ms_5.mp4` (14 / 30 / 20 cm, DR, 1.95 m/s).
 
 ## PARC terrain data (2026-11-08, lab server)
 

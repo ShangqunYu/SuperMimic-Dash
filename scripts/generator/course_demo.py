@@ -27,7 +27,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from closed_loop import REPO, run_loop  # noqa: E402
+from closed_loop import REPO, build_library, run_loop  # noqa: E402
 from rollout_generator import first_library, load, standing_frame  # noqa: E402
 
 from supermimic.generator.data import GEN_GRID  # noqa: E402
@@ -101,7 +101,12 @@ def run(a):
     cmd_v = torch.tensor([[a.speeds[c[1]], 0.0, 0.0] for c in combo], device=dev)
     model, diff, ck = load(a.gen_ckpt, dev)
     start = standing_frame(first_library(ck), dev).repeat(n, 1)
-    Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, seed=a.seed, dr=a.dr, delay=a.dr)
+    if a.student:
+        Q = run_student(a, terr, tiles, start, cmd_v, out, dev)
+        R = Q.clone()
+        R[..., 2] -= 50.0  # no plan: a ghost would sit far below the floor
+    else:
+        Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, seed=a.seed, dr=a.dr, delay=a.dr)
     res = score(Q, tiles, terr, [b[1] for b in built], [b[2] for b in built], dev)
     table = {}
     for (v, s, k), r in zip(combo, res):
@@ -117,9 +122,40 @@ def run(a):
                     fails[nxt] = fails.get(nxt, 0) + 1
             summary.setdefault(nm, {})[sp] = {"success": f"{len(v)}/{len(rs)}", "course_m_s": round(float(np.mean(v)), 2) if v else None, "failed_at": fails}
             print(f"{nm} | joystick {sp} m/s: {len(v)}/{len(rs)} @ {summary[nm][sp]['course_m_s']} m/s, failed at {fails}", flush=True)
-    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "dr": a.dr, "seed": a.seed, "summary": summary, "runs": table}, indent=1))
+    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "student": a.student, "dr": a.dr, "seed": a.seed, "summary": summary,
+                                                  "runs": table}, indent=1))
     torch.save({"robot": Q.cpu(), "plan": R.cpu(), "variants": variants, "names": names, "speeds": a.speeds, "samples": S, "combo": combo, "results": res,
-                "marks": [b[1] for b in built], "finish": [b[2] for b in built], "dr": a.dr}, out / "traj.pt")
+                "marks": [b[1] for b in built], "finish": [b[2] for b in built], "dr": a.dr, "student": a.student}, out / "traj.pt")
+
+
+@torch.no_grad()
+def run_student(a, terr, tiles, start, cmd_v, out: Path, dev: str):
+    """The depth student alone (joystick + proprio + depth; no generator, no teacher). -> robot frames (n, T, 25)."""
+    sys.path.insert(0, str(REPO / "scripts/student"))
+    from eval_student import robot_frame, student_env
+    from rollout_generator import operator
+
+    from supermimic.student.model import StudentRunner, load_student
+    from supermimic.terrain.terrains import terrains_path
+
+    ck = torch.load(a.student, map_location=dev, weights_only=False)
+    stu = load_student(a.student, dev)
+    T = int(a.seconds * 50)
+    lib = out / "student_library.pt"
+    build_library(lib, terr, tiles.tolist(), start, T + 200)
+    env, cmd, obs = student_env(lib, len(tiles), a.seed, a.dr, ck["env_kwargs"], dev)
+    runner = StudentRunner(stu, len(tiles), dev)
+    origins = env.scene.env_origins
+    buf = robot_frame(cmd, origins)[:, None]
+    Q = []
+    for _ in range(T):
+        obs, *_ = env.step(runner.act(obs["proprio"], operator(buf, cmd_v), obs["depth"]))
+        buf = robot_frame(cmd, origins)[:, None]
+        Q.append(buf[:, 0])
+    env.close()
+    for f in (lib, terrains_path(lib)):
+        f.unlink(missing_ok=True)
+    return torch.stack(Q, 1)
 
 
 def render_runs(a):
@@ -171,7 +207,8 @@ def render_runs(a):
         pert = mujoco.MjvPerturb()
         key = m.light("key").id
         kd = m.light_dir[key] / np.linalg.norm(m.light_dir[key])
-        head = f"Dash: motion generator + tracking policy{' (domain randomization)' if tr['dr'] else ''}"
+        who = "depth student policy (one network: depth camera + proprioception)" if tr.get("student") else "motion generator + tracking policy"
+        head = f"Dash: {who}{', domain randomization + sensor noise' if tr['dr'] else ''}"
         sub = f"stairs {rise * 100:.0f} cm up, {gap * 100:.0f} cm gap, {plat * 100:.0f} cm platform, stairs down"
 
         def frames():
@@ -216,7 +253,9 @@ def main():
     ap.add_argument("--samples", type=int, default=8)
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--dr", action="store_true", help="robot + hardware DR, observation noise, 0-25 ms actuator delay")
+    ap.add_argument("--dr", action="store_true", help="robot + hardware DR, observation noise, 0-25 ms actuator delay (student: and the depth "
+                    "camera's noise, dropouts, latency and pose)")
+    ap.add_argument("--student", help="run this depth student alone instead of the generator + teacher (gen_ckpt still gives the start pose)")
     ap.add_argument("--render", action="store_true", help="render runs from out/traj.pt")
     ap.add_argument("--pick", type=int, nargs=3, metavar=("VARIANT", "SPEED", "SAMPLE"))
     ap.add_argument("--ghost", action="store_true")
