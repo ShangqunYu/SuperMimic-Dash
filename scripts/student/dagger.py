@@ -1,7 +1,7 @@
 """DAgger for the depth student (supermimic/student/model.py) from the generator + v6 teacher, in physics.
 
   python scripts/student/dagger.py gen_ckpt teacher_ckpt run_dir [--envs 2048] [--rounds 40] [--seconds 12]
-      [--iters 1500] [--batch 1024] [--keep 12] [--eval-every 5] [--seed 0] [--resume]
+      [--iters 1500] [--batch 1024] [--keep 12] [--eval-every 5] [--seed 0] [--resume] [--families flat=0.35,...]
 
 Each round: --envs robots on augment.py's random terrains (stairs up / down, a box, a platform up / down, flat)
 with its varying joystick (command_schedule), in the student's training conditions (observation noise with the
@@ -35,7 +35,7 @@ import torch.nn.functional as F
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts/generator"))
 sys.path.insert(0, str(REPO / "scripts/student"))
-from augment import command_schedule, sample_scene  # noqa: E402
+from augment import FAMILIES, command_schedule, sample_scene  # noqa: E402
 from closed_loop import build_library, with_velocities  # noqa: E402
 from eval_student import evaluate, robot_frame, student_env  # noqa: E402
 from rollout_generator import REPLAN, VEL_HALFLIFE, command_path, first_library, load, operator, standing_frame  # noqa: E402
@@ -198,11 +198,17 @@ def main():
     ap.add_argument("--warmup", type=int, default=500)
     ap.add_argument("--beta-decay", type=float, default=0.5, help="share of envs the teacher drives: decay^round")
     ap.add_argument("--sidestep", type=float, default=0.15, help="flat: share of joystick segments that are pure sidesteps")
+    ap.add_argument("--families", default=None, help="terrain family weights as augment.py's, e.g. flat=0.35,stairs_up=0.2 (others 0)")
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
+    if a.families:
+        w = {k: float(v) for k, v in (kv.split("=") for kv in a.families.split(","))}
+        assert set(w) <= set(FAMILIES), w
+        FAMILIES.clear()
+        FAMILIES.update({k: v / sum(w.values()) for k, v in w.items()})
     dev = a.device
     run = Path(a.run)
     run.mkdir(parents=True, exist_ok=True)
