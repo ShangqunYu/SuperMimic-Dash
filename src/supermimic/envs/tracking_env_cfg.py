@@ -34,6 +34,7 @@ from mjlab.viewer import ViewerConfig
 
 from supermimic.data.recorder import ReplayRecorderCfg
 from supermimic.envs.actions import NoisyJointPositionActionCfg
+from supermimic.envs.mdp import depth as sm_depth
 from supermimic.envs.mdp import observations as sm_obs
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
@@ -107,6 +108,10 @@ class SuperMimicEnvCfgArgs:
     # group, after the anchor terms. Needs a terrain library.
     policy_scan: bool = False
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/play.py)
+    # Depth student: the robot carries the RealSense D435 and a ``depth`` group serves its forward depth
+    # (envs/mdp/depth.py; stereo noise, dropouts and latency with obs_noise, mount DR with
+    # domain_randomization). Dash only.
+    depth: bool = False
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
@@ -154,6 +159,10 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             enable_corruption=a.obs_noise,
         ),
     }
+    if a.depth:
+        if robot.name != "dash":
+            raise ValueError("depth needs the dash robot (its RealSense)")
+        observations["depth"] = sm_depth.depth_observation_group(noisy=a.obs_noise)
 
     # ---------------------------------------------------------------- actions
     actions = {
@@ -223,6 +232,8 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             if robot.hardware_dr is None:
                 raise ValueError(f"robot {robot.name} has no hardware randomization")
             robot.hardware_dr(events)
+        if a.depth:
+            sm_depth.add_camera_randomization(events)
     else:
         # Evaluation protocol: foot friction fixed at 1.0, no other randomization.
         events["foot_friction"] = EventTermCfg(
@@ -268,8 +279,10 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot.foot_geom_regex, "com_body_name": robot.com_body, "hardware_xi": a.hardware_dr,
                                                         "terrain_xi": terrains is not None})
 
+    robot_kw = {**({"command_delay": True} if a.command_delay else {}), **({"realsense": True} if a.depth else {})}
     cfg = ManagerBasedRlEnvCfg(
-        scene=SceneCfg(terrain=terrain_entity_cfg(terrains.num_slots if terrains is not None else None), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(command_delay=True) if a.command_delay else robot.entity_cfg()}),
+        scene=SceneCfg(terrain=terrain_entity_cfg(terrains.num_slots if terrains is not None else None), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(**robot_kw)},
+                       sensors=(sm_depth.depth_camera_cfg(),) if a.depth else ()),
         observations=observations,
         actions=actions,
         commands=commands,

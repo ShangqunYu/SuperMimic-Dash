@@ -57,7 +57,7 @@ class RobotSpec:
     name: str
     joint_names: tuple[str, ...]  # MuJoCo joint order (= qpos order = action order)
     xml_path: Callable[[], Path]
-    entity_cfg: Callable[..., EntityCfg]  # kwargs: command_delay (robots that model one)
+    entity_cfg: Callable[..., EntityCfg]  # kwargs: command_delay (robots that model one), realsense (Dash)
     action_scale: Callable[[], dict[str, float]]
     root_body: str  # free-joint body (the state's root pose)
     anchor_body: str  # reward / re-anchoring body, one of tracked_bodies

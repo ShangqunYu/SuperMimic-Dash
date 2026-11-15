@@ -870,6 +870,40 @@ to run the final student.
   of terrain windows). Run **`gen_v2`** (GPU 0): gen_v1 + `--terrain-frac 0.75 --terrain-balance 0.5` (box
   jump-over 4.0 -> 7.4% of all windows; flat 50 -> 25%), log `logs/gen_v2.out`.
 
+## Depth student (2026-11-14, lab server)
+
+Plan step 3 (user's decisions 2026-11-14): one network on the robot, trained by DAgger in the physics sim from
+gen_v6 (half-life 0.1) + the v6 teacher; no world model (it cannot render depth). Student: a small transformer
+over a fixed window (depth tokens, one per 10 Hz frame, ~2 s; proprio + joystick + last action tokens, ~0.5 s),
+chosen over a GRU because DAgger then trains on shuffled self-contained windows (no stale hidden states) and RL
+fine-tuning later sees a feed-forward policy. RL fine-tuning (task reward + a stay-near-teacher term, critic
+warm-up first) is a possible later step if the DAgger student falls short of the teacher.
+- **Demonstrator under the student's training conditions**: gen_v6 + v6 teacher with robot + hardware DR, obs noise
+  and the 0-25 ms actuator delay: 294-296 / 360 vs 310 (see the generator section). Train the student with DR and
+  delay on.
+- **Camera** (`assets/dash/dash.py`, `realsense=True`; off by default, the teachers trained without its 92 g):
+  the RealSense D435 + jig of mjlab_dash commit db83fd6, camera `robot/realsense_depth`, 50 deg below
+  horizontal, fovy 58.9 deg. Standing, the lens is 0.66 m up and sees the ground from ~0.1 to ~1.8 m ahead;
+  ~3-7 % of the image is the robot's own arms / legs (the real lens sees them too).
+- **Pipeline** (`envs/mdp/depth.py`, env arg `depth=True`, Dash only): ported from mjlab_dash `depth.py` (parkour
+  Go1 settings): render 106x60 (the 424x240 stream / 4), crop 60 / 46 of 424 columns, resize to 64x48, clip
+  0-2 m, scale to [0, 1]; `process_depth` is the same code on the robot. With `obs_noise`: uniform 0-2 cm noise,
+  0 closer than 0.12 m, dropouts, 10 Hz frames held between refreshes (staggered per env), 80-140 ms latency
+  (obs delay buffer; a placeholder, measure on the robot). With `domain_randomization`: camera mount +-3 mm,
+  +-0.6-1.1 deg, fovy +-1 deg per env.
+- **Dropouts (new here, rates are guesses until compared with recorded robot depth)**: pixels at occluding edges
+  (second difference of inverse depth > 0.06 /m along a row or column: zero on any plane however grazing, so
+  floors, treads and risers never count; drop edges, step lips seen from above, box sides and the robot's
+  outline do) lost with p 0.3; with p 0.3 a frame loses 1-3 blobs of 3-10 px (render pixels). A first version
+  thresholded the depth jump (5 cm) and flagged all distant flat floor (adjacent rows differ by ~10 cm at 2 m).
+- **Check** (`scripts/student/depth_check.py teacher out [--noisy] [--bench N...]`): robots stand 0.8 m before
+  each of rollout_generator's 15 scenes' first edge; each rendered pixel vs depth ray-marched through the
+  heightfield: p95 error <= 0.21 cm, none > 3 cm, clean and with full DR (per-env camera pose and fovy). The
+  renderer gives planar depth (as the D435), and mujoco_warp's BVH refit reads per-world geom_size / geom_xpos,
+  so the per-env terrain box slots render. Images: `logs/student/depth_check/depth{,_noisy}.png`.
+- **Cost**: env step 18.9 -> 40.2 ms at 4110 envs (17.1 -> 22.2 at 1035); the camera renders every step though
+  each env takes a frame every 5th. Rendering only every 5th step (synchronized phases) would recover most of it.
+
 ## PARC terrain data (2026-11-08, lab server)
 
 Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SIGGRAPH 2025; MIT):
