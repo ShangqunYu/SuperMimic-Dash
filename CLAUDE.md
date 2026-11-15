@@ -981,7 +981,13 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   |ratio - 1| 0.04-0.12; fixed by re-encoding the window after each update, plus cudnn TF32 off: 0.016); PPO at a
   fixed 5e-5 moves the policy to KL ~0.2 per update at std 0.1 (clip fraction 0.6), hence the adaptive lr from
   update 150, bounded 5e-6..1e-4. Update cost: the transformer, not the CNN (3.2 s per update of 2048 x 24 steps,
-  5 epochs x 4 env-grouped minibatches). **rl_v1** (GPU 0, from v4 r30, seed 4): v4's mix (`--courses
+  5 epochs x 4 env-grouped minibatches), but make_env's `configure_torch_backends` turns cudnn autotuning on and
+  a new unique-frame count per minibatch re-tuned the CNN every step (12 s per update): off after each env build.
+  First try (`logs/student/rl_v1_chunkdagger/`): the DAgger term on the PPO chunk itself. The robots of a round
+  are in step (no resets), so a chunk is one 0.5 s slice of every round; fitting the teacher on it chased that
+  slice: after one round of actor updates (25, lam 0.99, lr 5e-5) the slow suite fell to 76 / 120 (stairs up
+  14 / 18 cm 0 / 8, stairs down 14 cm 2 / 8). Now the DAgger term draws windows from a replay of the last 8 rounds
+  (dagger.Replay), PPO stays on the chunk. **rl_v1** (GPU 0, from v4 r30, seed 4): v4's mix (`--courses
   --course-share 0.5`, v2 families) with `--vmax 2.5 --tall-stairs 0.5 --gap-max 0.5`, 100 rounds, critic-only
   rounds 0-2, lam_D to 0.1 by round 53; log `logs/student_rl_v1.out`, run `logs/student/rl_v1/`.
 

@@ -9,13 +9,14 @@ checkpoint.
 Rounds as dagger.py's (--envs robots for --seconds on its scenes / courses, the generator replanning every 0.2 s from
 each robot's motion, the student's training conditions, no resets; a robot is done once down), but the student
 drives every env, sampling a Gaussian around its action (a learned std per joint, from --std0 = 0.1, the teacher's
-training noise). Every --steps steps one update on those steps: PPO (clip 0.2, gamma 0.99, GAE 0.95) on the env's
+training noise). Every --steps steps one update: PPO (clip 0.2, gamma 0.99, GAE 0.95) on those steps with the env's
 reward, the teacher's own tracking reward (Table A.2) against the generator's plan, and the DAgger loss to the
-teacher's action at the same states. Actor loss (1 - lam) PPO + lam * coef * MSE, lam linear from 1 to
---dagger-floor over --anneal rounds after the warm-up (PHP: the DAgger term must stay on); the actor lr is fixed for
---adaptive-after updates, then adapted to a KL of 0.01 (PHP's order). The critic (an MLP) sees the teacher's inputs
-(proprio history, goal frames, terrain scan); in the first --critic-warmup rounds only it trains. --tall-stairs /
---gap-max: courses.py's share of stairs with 15-19 cm risers and its widest gap.
+teacher's action on windows from a replay of the last --keep rounds (as dagger.py's). Actor loss (1 - lam) PPO +
+lam * coef * MSE, lam linear from 1 to --dagger-floor over --anneal rounds after the warm-up (PHP: the DAgger term
+must stay on); the actor lr is fixed for --adaptive-after updates, then adapted to a KL of 0.01 (PHP's order). The
+critic (an MLP) sees the teacher's inputs (proprio history, goal frames, terrain scan); in the first --critic-warmup
+rounds only it trains. --tall-stairs / --gap-max: courses.py's share of stairs with 15-19 cm risers and its widest
+gap.
 Writes run_dir/ckpt_XXX.pt (loaded by eval_student / course_demo as DAgger's), ckpt_latest.pt and log.jsonl.
 """
 
@@ -38,7 +39,7 @@ sys.path.insert(0, str(REPO / "scripts/generator"))
 sys.path.insert(0, str(REPO / "scripts/student"))
 import courses  # noqa: E402
 from augment import FAMILIES  # noqa: E402
-from dagger import close_round, open_round, replan, sample_scenes, still_up  # noqa: E402
+from dagger import Replay, close_round, open_round, replan, sample_scenes, still_up  # noqa: E402
 from eval_student import evaluate, robot_frame  # noqa: E402
 from rollout_generator import REPLAN, first_library, load, operator, standing_frame  # noqa: E402
 
@@ -46,7 +47,6 @@ from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoi
 from supermimic.student.model import Student, StudentCfg, StudentRunner  # noqa: E402
 
 LOG2PI = math.log(2 * math.pi)
-torch.backends.cudnn.allow_tf32 = False  # the acting and the training passes see different batches: keep them exact
 
 
 class Critic(nn.Module):
@@ -105,8 +105,10 @@ def refresh_tokens(runner: StudentRunner, D, t: int) -> None:
     runner.D = runner.m.encode_depth(D[:, ki].reshape(-1, c.depth_h, c.depth_w).float() / 255).reshape(n, c.n_depth, -1)
 
 
-def update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_actor, st, a):
-    """One PPO + DAgger update on a chunk (ch: per (env, step) tensors of --steps steps from t0). -> stats."""
+def update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_actor, replay: Replay, st, a):
+    """One update: PPO on a chunk (ch: per (env, step) tensors of --steps steps from t0), the DAgger term on windows
+    drawn from the replay of earlier rounds (a chunk is one 0.5 s slice of every robot's round: fitting the teacher
+    on it alone chases that slice and forgets the rest). -> stats."""
     cfg = student.cfg
     n, S = ch["alive"].shape
     idx = ch["alive"].flatten().nonzero()[:, 0]
@@ -119,7 +121,7 @@ def update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_acto
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
     ret = flat["adv"] + flat["val"]
     log_std_old = log_std.detach().clone()
-    out = {k: [] for k in ("vloss", "surr", "dagger", "kl", "clip", "ratio0")}
+    out = {k: [] for k in ("vloss", "surr", "dagger", "dagger_chunk", "kl", "clip", "ratio0")}
     student.train()
     for ep in range(a.epochs):
         # Minibatches by env (all its steps in the chunk): windows of one env share most depth frames, ~4x fewer
@@ -151,7 +153,9 @@ def update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_acto
             A = adv[mb]
             surr = -torch.min(ratio * A, ratio.clamp(1 - a.clip, 1 + a.clip) * A).mean()
             ent = (log_std + 0.5 * (1 + LOG2PI)).sum()
-            dag = F.mse_loss(mu, flat["a_tch"][mb])
+            Pd, Dd, Ad = replay.batch(a.dagger_batch)
+            mu_d = student(Pd, student.encode_depth(Dd).reshape(len(Pd), cfg.n_depth, -1))
+            dag = F.mse_loss(mu_d, Ad)
             loss = (1 - lam) * (surr - a.entropy * ent) + lam * a.dagger_coef * dag
             opt_a.zero_grad(set_to_none=True)
             loss.backward()
@@ -171,6 +175,7 @@ def update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_acto
                 gr["lr"] = st["lr"]
             out["surr"].append(surr.item())
             out["dagger"].append(dag.item())
+            out["dagger_chunk"].append(F.mse_loss(mu.detach(), flat["a_tch"][mb]).item())
             out["kl"].append(kl)
             out["clip"].append(((ratio - 1).abs() > a.clip).float().mean().item())
     student.eval()
@@ -202,6 +207,8 @@ def main():
     ap.add_argument("--std0", type=float, default=0.1, help="initial action std")
     ap.add_argument("--dagger-coef", type=float, default=10.0)
     ap.add_argument("--dagger-floor", type=float, default=0.1)
+    ap.add_argument("--dagger-batch", type=int, default=2048, help="replay windows per minibatch for the DAgger term")
+    ap.add_argument("--keep", type=int, default=8, help="rounds in the DAgger replay")
     ap.add_argument("--anneal", type=float, default=50, help="rounds (after the warm-up) for the DAgger weight to reach its floor")
     ap.add_argument("--critic-warmup", type=int, default=3, help="rounds in which only the critic trains")
     ap.add_argument("--sidestep", type=float, default=0.15)
@@ -257,11 +264,15 @@ def main():
     per_round = T // S
     rng = np.random.default_rng([a.seed, rd0])
     lib = run / "round_library.pt"
+    replay = Replay(a.keep, n, T, cfg, dev)  # restarts empty on --resume
     for rd in range(rd0, a.rounds):
         t_start = time.perf_counter()
         sc, sched = sample_scenes(rng, a, n, T)
         sched = torch.as_tensor(sched, device=dev)
         env, cmd, obs, scan, tiles, origins = open_round(sc, st, gen, env_kw, lib, T, a.seed * 1000 + rd, dev)
+        # make_env's configure_torch_backends turns cudnn autotuning on: with a different number of unique depth
+        # frames in every minibatch it re-tunes the CNN each time (4x slower updates).
+        torch.backends.cudnn.benchmark = False
         dc = obs["policy"].shape[-1] + obs["goal"].shape[-1]
         if critic is None:
             critic = Critic(dc).to(dev)
@@ -271,8 +282,10 @@ def main():
         runner = StudentRunner(student, n, dev)
         P = torch.zeros(n, T, cfg.proprio_dim + cfg.cmd_dim, device=dev)
         D = torch.zeros(n, T // de, cfg.depth_h, cfg.depth_w, dtype=torch.uint8, device=dev)
+        A_r = torch.zeros(n, T, cfg.act_dim, dtype=torch.float16, device=dev)
+        alive_r = torch.zeros(n, T, dtype=torch.bool, device=dev)
         up = torch.ones(n, dtype=torch.bool, device=dev)
-        train_actor = rd >= a.critic_warmup
+        train_actor = rd >= a.critic_warmup and replay.idx is not None
         rec = {"round": rd, "reward": 0.0, "alive_steps": 0}
         stats, t_upd = [], 0.0
         for t0 in range(0, T, S):
@@ -300,7 +313,8 @@ def main():
                     mu = runner.act(obs["proprio"], joy, depth / 255)
                     x = mu + log_std.exp() * torch.randn_like(mu)
                     ch["mu"][:, i], ch["act"][:, i], ch["logp"][:, i] = mu, x, log_prob(mu, log_std, x)
-                    ch["alive"][:, i] = up
+                    ch["alive"][:, i] = alive_r[:, t] = up
+                    A_r[:, t] = ch["a_tch"][:, i]
                     obs, r, *_ = env.step(x)
                     now = robot_frame(cmd, origins)
                     buf = torch.cat([buf[:, 1:], now[:, None]], 1)
@@ -322,7 +336,7 @@ def main():
             k = max(0, state["updates"] - a.critic_warmup * per_round)
             lam = max(a.dagger_floor, 1 - k / (a.anneal * per_round)) if train_actor else 1.0
             t1 = time.perf_counter()
-            s = update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_actor, state, a)
+            s = update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_actor, replay, state, a)
             if train_actor and t0 + S < T:
                 refresh_tokens(runner, D, t0 + S)
             t_upd += time.perf_counter() - t1
@@ -330,10 +344,12 @@ def main():
             stats.append({**s, "lam": lam})
             del ch
         close_round(env, lib)
+        replay.add({"P": P.half(), "D": D, "A": A_r, "alive": alive_r})
+        del A_r, alive_r
         fam = np.array([s_[0] for s_ in sc])
         past = np.array([np.nan if s_[5] is None else s_[5] for s_ in sc])
         ok = up.cpu().numpy() & (np.isnan(past) | (buf[:, -1, 0].cpu().numpy() > np.nan_to_num(past)))
-        rec.update({k: round(float(np.mean([s_[k] for s_ in stats if k in s_])), 5) for k in ("vloss", "surr", "dagger", "kl", "clip", "ratio0", "lam")
+        rec.update({k: round(float(np.mean([s_[k] for s_ in stats if k in s_])), 5) for k in ("vloss", "surr", "dagger", "dagger_chunk", "kl", "clip", "ratio0", "lam")
                     if any(k in s_ for s_ in stats)})
         rec["reward"] = round(rec["reward"] / max(rec["alive_steps"], 1), 5)
         rec.update({"up": round(float(up.float().mean()), 3), "pass": {f: round(float(ok[fam == f].mean()), 2) for f in sorted(set(fam))},
