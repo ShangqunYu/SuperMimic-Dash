@@ -963,6 +963,10 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   raised deck; at 1.5 m/s the 50 cm gap fails more (no run-up). Under DR at 2.5 m/s (beyond its 2 m/s training
   joystick) it falls on the stairs up. Videos: `logs/course_demo/student_v4_clean/course_v7_2.0ms_1.mp4` (14 / 50 /
   30 cm, 1.92 m/s), `logs/course_demo/student_v4_dr/course_v4_2.0ms_5.mp4` (14 / 30 / 20 cm, DR, 1.95 m/s).
+  17 / 18 cm risers (`--rises 0.17 0.18`, `logs/course_demo/tall_*`), of 64 at 1.5 / 2.0 / 2.5 m/s: generator +
+  teacher clean 59 / 45 / 56, DR 48 / 37 / 29; student clean 51 / 36 / 22, DR 25 / 5 / 0. The added falls are
+  nearly all on the stairs up. The DR student trips at the 1st-2nd riser (x 1.7-2.1 m, 1.3-1.4 s in, still
+  accelerating), the clean one at the 3rd-4th.
 
 ## PARC terrain data (2026-11-08, lab server)
 
