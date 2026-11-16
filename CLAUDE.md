@@ -947,7 +947,7 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   `logs/student_dagger_v4.out`. 3 seeds, slow / fast: r15 281 / 402, r20 285 / 403, r25 281 / 379, **r30 296 / 397**
   (v2 292 / 266, v3 403 at best): slow stairs down back to 24 / 23 of 24, platform up 30 cm 20 (best yet). Weak spots
   left: stairs up 18 cm (slow 14, fast 4 of 24), rough blocks 0-20 cm 11, platform up 50 cm 0 (beyond the data).
-  **Best student: `logs/student/dagger_v4/ckpt_029.pt`.**
+  Best student then: `logs/student/dagger_v4/ckpt_029.pt`.
 - **Course demo** (`scripts/generator/course_demo.py`, generator + v6 teacher, clean physics unless `--dr`): a 2 m wide
   course of 5 stairs up (10 / 14 cm) onto a deck, a 30 / 50 cm gap in the deck, a 20 / 30 cm platform up, stairs down
   (<= 15 cm), run-out; joystick vx held. 8 variants x 8 runs, success (whole course, never down) / mean speed over the
@@ -1052,6 +1052,14 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   (a round's depth is now 3.8 GB on the GPU), v4's mix + `--vmax 2.5 --tall-stairs 0.5 --gap-max 0.6`. Smoke test
   (512 envs): collection time unchanged by the per-step depth processing; the r71 warm start's action MSE under
   the new timing 0.18 -> 0.10 after 100 iterations. Log `logs/student_dagger_v5.out`.
+  Result (1.8 h): round 1 dipped (student up 0.84 -> 0.60, the replay held one round at warm-up lr) and recovered
+  by round 2; student up 0.87 -> 0.90, action MSE (student envs) 0.10 -> 0.075 by round 29, still falling. 3 seeds,
+  slow / fast: r19 **304** / 408, r24 **300 / 425**, r29 293 / 419 (v4 296 / 397, rl_v1 r71 287 / 421, rl_v2 r47
+  260 / 426): pure DAgger with the fresher camera matches the RL runs at speed without their slow-speed losses
+  (sidestep 19-21 of 24, stairs up 10 cm 22-23). Tall-stairs course DR, 1.5 / 2.0 m/s of 64: r19 30 / 13, r24 28 /
+  **22**, r29 35 / 19 (v4 25 / 5, rl_v1 r83 26 / 14, rl_v2 r59 35 / 13; generator + teacher 48 / 37). **Best
+  student now: `logs/student/dagger_v5/ckpt_024.pt`** (valid only if the robot's camera path achieves ~60-80 ms with
+  a fresh frame each step: run the D435 at 60 fps and measure).
 
 ## PARC terrain data (2026-11-08, lab server)
 
