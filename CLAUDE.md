@@ -1060,6 +1060,11 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   **22**, r29 35 / 19 (v4 25 / 5, rl_v1 r83 26 / 14, rl_v2 r59 35 / 13; generator + teacher 48 / 37). **Best
   student now: `logs/student/dagger_v5/ckpt_024.pt`** (valid only if the robot's camera path achieves ~60-80 ms with
   a fresh frame each step: run the D435 at 60 fps and measure).
+  Continued to round 49 (`--resume --rounds 50 --lr 1e-4`: the cosine horizon grows with --rounds, so the lr was
+  lowered to resume near 4e-5; the replay restarts empty, no dip; log `logs/student_dagger_v5b.out`): converged.
+  Action MSE flat at ~0.073; 3 seeds, slow / fast: r39 304 / 416, r44 291 / 413, r49 292 / 411 (r24 300 / 425),
+  all within noise. Tall-stairs course DR, 1.5 / 2.0 m/s: r39 33 / 23, r44 35 / 20, r49 **39 / 25** (r24 28 / 22,
+  r29 35 / 19); stairs up remains the failure (30-35 of 64 at 2 m/s vs the teacher's 15).
 
 ## PARC terrain data (2026-11-08, lab server)
 
