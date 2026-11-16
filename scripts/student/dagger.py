@@ -56,19 +56,22 @@ DOWN_UP_Z = 0.5  # cos 60 deg, the torso's up axis
 
 
 class Replay:
-    """The last `keep` rounds, each (n envs, T steps), on the GPU."""
+    """The last `keep` rounds, each (n envs, T steps), on the GPU; aux_dim > 0: also a per-step int8 target (X)."""
 
-    def __init__(self, keep: int, n: int, T: int, cfg: StudentCfg, dev: str):
+    def __init__(self, keep: int, n: int, T: int, cfg: StudentCfg, dev: str, aux_dim: int = 0):
         de = cfg.depth_every
         self.P = torch.zeros(keep, n, T, cfg.proprio_dim + cfg.cmd_dim, dtype=torch.float16, device=dev)
         self.D = torch.zeros(keep, n, T // de, cfg.depth_h, cfg.depth_w, dtype=torch.uint8, device=dev)
         self.A = torch.zeros(keep, n, T, cfg.act_dim, dtype=torch.float16, device=dev)
         self.alive = torch.zeros(keep, n, T, dtype=torch.bool, device=dev)
+        self.X = torch.zeros(keep, n, T, aux_dim, dtype=torch.int8, device=dev) if aux_dim else None
         self.cfg, self.keep, self.next, self.idx = cfg, keep, 0, None
 
     def add(self, d: dict) -> None:
         k = self.next % self.keep
         self.P[k], self.D[k], self.A[k], self.alive[k] = d["P"], d["D"], d["A"], d["alive"]
+        if self.X is not None:
+            self.X[k] = d["X"]
         self.next += 1
         self.idx = self.alive.flatten().nonzero()[:, 0]
 
@@ -80,7 +83,8 @@ class Replay:
         pi = (t[:, None] - c.n_proprio + 1 + torch.arange(c.n_proprio, device=t.device)).clamp_min(0)
         k = t // c.depth_every
         ki = (k[:, None] - c.n_depth + 1 + torch.arange(c.n_depth, device=t.device)).clamp_min(0)
-        return self.P[r[:, None], e[:, None], pi].float(), self.D[r[:, None], e[:, None], ki].float() / 255, self.A[r, e, t].float()
+        out = self.P[r[:, None], e[:, None], pi].float(), self.D[r[:, None], e[:, None], ki].float() / 255, self.A[r, e, t].float()
+        return out if self.X is None else (*out, self.X[r, e, t])
 
 
 def sample_scenes(rng, a, n: int, T: int):

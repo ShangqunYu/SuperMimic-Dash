@@ -33,6 +33,7 @@ class StudentCfg:
     layers: int = 3
     heads: int = 4
     ff: int = 256
+    aux_dim: int = 0  # > 0: a training-only head predicting the terrain scan around the robot (rl_finetune.py --aux)
 
 
 class Student(nn.Module):
@@ -53,6 +54,8 @@ class Student(nn.Module):
         layer = nn.TransformerEncoderLayer(w, cfg.heads, cfg.ff, dropout=0.0, activation="gelu", batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, cfg.layers, enable_nested_tensor=False)
         self.head = nn.Sequential(nn.LayerNorm(w), nn.Linear(w, 256), nn.ELU(), nn.Linear(256, cfg.act_dim))
+        if cfg.aux_dim:
+            self.aux = nn.Sequential(nn.LayerNorm(w), nn.Linear(w, 256), nn.ELU(), nn.Linear(256, cfg.aux_dim))
         # Input normalization of proprioception + command, set once from the first data (set_normalization).
         self.register_buffer("in_mean", torch.zeros(d_in))
         self.register_buffer("in_std", torch.ones(d_in))
@@ -67,12 +70,17 @@ class Student(nn.Module):
         """img (B, depth_h * depth_w) or (B, 1, depth_h, depth_w) in [0, 1] -> (B, width) token."""
         return self.cnn(img.reshape(-1, 1, self.cfg.depth_h, self.cfg.depth_w))
 
-    def forward(self, proprio: torch.Tensor, depth_tok: torch.Tensor) -> torch.Tensor:
+    def forward(self, proprio: torch.Tensor, depth_tok: torch.Tensor, aux: bool = False):
         """proprio (B, n_proprio, proprio_dim + cmd_dim) oldest first; depth_tok (B, n_depth, width) oldest first
-        -> action (B, act_dim)."""
+        -> action (B, act_dim); aux: (action, terrain scan prediction (B, aux_dim))."""
+        h = self.trunk(proprio, depth_tok)
+        return (self.head(h), self.aux(h)) if aux else self.head(h)
+
+    def trunk(self, proprio: torch.Tensor, depth_tok: torch.Tensor) -> torch.Tensor:
+        """-> the readout token's features (B, width), the heads' input."""
         p = self.proprio((proprio - self.in_mean) / self.in_std)
         x = torch.cat([self.readout.expand(len(p), -1, -1), depth_tok, p], 1) + self.pos
-        return self.head(self.encoder(x)[:, 0])
+        return self.encoder(x)[:, 0]
 
     def config(self) -> dict:
         return asdict(self.cfg)

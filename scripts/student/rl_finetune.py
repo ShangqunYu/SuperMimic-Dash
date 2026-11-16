@@ -4,7 +4,7 @@ checkpoint.
   python scripts/student/rl_finetune.py gen_ckpt teacher_ckpt student_ckpt run_dir [--envs 2048] [--rounds 100]
       [--steps 24] [--anneal 50] [--dagger-floor 0.1] [--dagger-coef 10] [--critic-warmup 3] [--eval-every 4]
       [dagger.py's scene flags: --courses --course-share --families --flat-share --vmax --sidestep]
-      [--tall-stairs 0.5] [--gap-max 0.5] [--resume]
+      [--tall-stairs 0.5] [--gap-max 0.5] [--edge 5 --foothold 1 --aux 1] [--lam0 1] [--resume]
 
 Rounds as dagger.py's (--envs robots for --seconds on its scenes / courses, the generator replanning every 0.2 s from
 each robot's motion, the student's training conditions, no resets; a robot is done once down), but the student
@@ -16,7 +16,12 @@ lam * coef * MSE, lam linear from 1 to --dagger-floor over --anneal rounds after
 must stay on); the actor lr is fixed for --adaptive-after updates, then adapted to a KL of 0.01 (PHP's order). The
 critic (an MLP) sees the teacher's inputs (proprio history, goal frames, terrain scan); in the first --critic-warmup
 rounds only it trains. --tall-stairs / --gap-max: courses.py's share of stairs with 15-19 cm risers and its widest
-gap.
+gap. Foot placement (--edge, --foothold; geometry from the robot's pose, the env has no contact sensor): penalties
+for a sole below the highest ground within --reach (a toe against a riser) and for a foot in contact straddling a
+> 3 cm height step (a stair edge, half over a gap). --aux: an auxiliary head predicting the teacher's terrain scan
+(POLICY_GRID, noise-free) from the student's features, trained on the replay, so the depth pathway keeps where the
+edges are. A checkpoint of this script as the student also gives the action std and the critic; --lam0 0.1 starts at
+the DAgger floor.
 Writes run_dir/ckpt_XXX.pt (loaded by eval_student / course_demo as DAgger's), ckpt_latest.pt and log.jsonl.
 """
 
@@ -28,6 +33,7 @@ import math
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -44,7 +50,9 @@ from eval_student import evaluate, robot_frame  # noqa: E402
 from rollout_generator import REPLAN, first_library, load, operator, standing_frame  # noqa: E402
 
 from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoint  # noqa: E402
+from supermimic.generator.metrics import FootMetrics  # noqa: E402
 from supermimic.student.model import Student, StudentCfg, StudentRunner  # noqa: E402
+from supermimic.terrain.height_scan import POLICY_GRID, POLICY_NOMINAL, SCAN_SCALE, HeightScan  # noqa: E402
 
 LOG2PI = math.log(2 * math.pi)
 
@@ -80,6 +88,26 @@ class Critic(nn.Module):
 
 def log_prob(mu, log_std, x):
     return (-0.5 * ((x - mu) / log_std.exp()) ** 2 - log_std - 0.5 * LOG2PI).sum(-1)
+
+
+def foot_terms(fm: FootMetrics, now: torch.Tensor, tiles: torch.Tensor, reach: float):
+    """Robot frames now (n, 25) -> per env: `edge`, the depth (m, summed over the sole points) below the highest
+    ground within `reach` (a toe against a riser, a sole catching a step's edge), and `straddle`, the number of
+    feet in contact (lowest sole point < 2 cm above the ground under it) whose toe and heel stand on ground more than
+    3 cm apart in height (on a stair edge, half over a gap). Geometry only: the env has no contact sensor."""
+    s = fm.sole(now[:, None, :3], now[:, None, 3:7], now[:, None, 7:])[:, 0]  # (n, 2 feet, 2 ends, 3)
+    n = len(s)
+    x, y = s[..., 0].reshape(n, -1), s[..., 1].reshape(n, -1)
+    g0 = fm.scan.lookup(x, y, tiles)
+    g = g0
+    for dx, dy in ((reach, 0.0), (-reach, 0.0), (0.0, reach), (0.0, -reach)):
+        g = torch.maximum(g, fm.scan.lookup(x + dx, y + dy, tiles))
+    g0, g = g0.reshape(n, 2, 2), g.reshape(n, 2, 2)
+    z = s[..., 2]
+    edge = (g - z - 0.01).clamp_min(0).sum((1, 2))
+    stance = (z - g0).amin(-1) < 0.02
+    straddle = (stance & (g0.amax(-1) - g0.amin(-1) > 0.03)).float().sum(1)
+    return edge, straddle
 
 
 def windows(P, D, e, t, cfg: StudentCfg):
@@ -121,7 +149,7 @@ def update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_acto
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
     ret = flat["adv"] + flat["val"]
     log_std_old = log_std.detach().clone()
-    out = {k: [] for k in ("vloss", "surr", "dagger", "dagger_chunk", "kl", "clip", "ratio0")}
+    out = {k: [] for k in ("vloss", "surr", "dagger", "dagger_chunk", "kl", "clip", "ratio0", "aux")}
     student.train()
     for ep in range(a.epochs):
         # Minibatches by env (all its steps in the chunk): windows of one env share most depth frames, ~4x fewer
@@ -142,6 +170,15 @@ def update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_acto
             opt_c.step()
             out["vloss"].append(vloss.item())
             if not train_actor:
+                if a.aux and replay.idx is not None:  # warm-up: fit the new terrain head on the frozen trunk
+                    Pd, Dd, _, Xd = replay.batch(a.dagger_batch)
+                    with torch.no_grad():
+                        h = student.trunk(Pd, student.encode_depth(Dd).reshape(len(Pd), cfg.n_depth, -1))
+                    aux = F.mse_loss(student.aux(h), Xd.float() * 0.01 / SCAN_SCALE)
+                    opt_a.zero_grad(set_to_none=True)
+                    aux.backward()
+                    opt_a.step()  # only the aux head has gradients
+                    out["aux"].append(aux.item())
                 continue
             Pw, inv, frames = windows(P, D, e[mb], t[mb], cfg)
             tok = student.encode_depth(frames)[inv]
@@ -153,10 +190,15 @@ def update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_acto
             A = adv[mb]
             surr = -torch.min(ratio * A, ratio.clamp(1 - a.clip, 1 + a.clip) * A).mean()
             ent = (log_std + 0.5 * (1 + LOG2PI)).sum()
-            Pd, Dd, Ad = replay.batch(a.dagger_batch)
-            mu_d = student(Pd, student.encode_depth(Dd).reshape(len(Pd), cfg.n_depth, -1))
+            Pd, Dd, Ad, *Xd = replay.batch(a.dagger_batch)
+            tok_d = student.encode_depth(Dd).reshape(len(Pd), cfg.n_depth, -1)
+            if a.aux:
+                mu_d, aux_d = student(Pd, tok_d, aux=True)
+                aux = F.mse_loss(aux_d, Xd[0].float() * 0.01 / SCAN_SCALE)
+            else:
+                mu_d, aux = student(Pd, tok_d), torch.zeros((), device=Pd.device)
             dag = F.mse_loss(mu_d, Ad)
-            loss = (1 - lam) * (surr - a.entropy * ent) + lam * a.dagger_coef * dag
+            loss = (1 - lam) * (surr - a.entropy * ent) + lam * a.dagger_coef * dag + a.aux * aux
             opt_a.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_([*student.parameters(), log_std], 1.0)
@@ -175,6 +217,8 @@ def update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_acto
                 gr["lr"] = st["lr"]
             out["surr"].append(surr.item())
             out["dagger"].append(dag.item())
+            if a.aux:
+                out["aux"].append(aux.item())
             out["dagger_chunk"].append(F.mse_loss(mu.detach(), flat["a_tch"][mb]).item())
             out["kl"].append(kl)
             out["clip"].append(((ratio - 1).abs() > a.clip).float().mean().item())
@@ -207,10 +251,15 @@ def main():
     ap.add_argument("--std0", type=float, default=0.1, help="initial action std")
     ap.add_argument("--dagger-coef", type=float, default=10.0)
     ap.add_argument("--dagger-floor", type=float, default=0.1)
+    ap.add_argument("--lam0", type=float, default=1.0, help="DAgger weight after the warm-up, annealed to --dagger-floor")
     ap.add_argument("--dagger-batch", type=int, default=2048, help="replay windows per minibatch for the DAgger term")
     ap.add_argument("--keep", type=int, default=8, help="rounds in the DAgger replay")
     ap.add_argument("--anneal", type=float, default=50, help="rounds (after the warm-up) for the DAgger weight to reach its floor")
     ap.add_argument("--critic-warmup", type=int, default=3, help="rounds in which only the critic trains")
+    ap.add_argument("--edge", type=float, default=0.0, help="penalty weight per m of sole below the highest ground within --reach")
+    ap.add_argument("--reach", type=float, default=0.04)
+    ap.add_argument("--foothold", type=float, default=0.0, help="penalty weight per foot in contact straddling a > 3 cm height step")
+    ap.add_argument("--aux", type=float, default=0.0, help="weight of an auxiliary loss: predict the teacher's terrain scan (POLICY_GRID)")
     ap.add_argument("--sidestep", type=float, default=0.15)
     ap.add_argument("--families", default=None)
     ap.add_argument("--courses", action="store_true")
@@ -238,13 +287,20 @@ def main():
     teacher, pcfg = load_policy_from_checkpoint(a.teacher, dev)
     env_kw = goal_env_kwargs(pcfg)
     ck0 = torch.load(a.student, map_location=dev, weights_only=False)
-    cfg = StudentCfg(**ck0["cfg"])
+    cfg = StudentCfg(**{**ck0["cfg"], "aux_dim": POLICY_GRID.dim if a.aux else ck0["cfg"].get("aux_dim", 0)})
     student = Student(cfg).to(dev)
-    student.load_state_dict(ck0["model"])
+    missing, unexpected = student.load_state_dict(ck0["model"], strict=False)
+    assert all(k.startswith("aux.") for k in missing + unexpected), (missing, unexpected)
     student.eval()
     log_std = nn.Parameter(torch.full((cfg.act_dim,), math.log(a.std0), device=dev))
-    opt_a = torch.optim.Adam([*student.parameters(), log_std], lr=a.lr)
     critic = opt_c = None
+    if "critic" in ck0:  # an rl_finetune checkpoint: keep its action std and critic (warmed up again for a new reward)
+        log_std.data.copy_(ck0["log_std"].to(dev))
+        critic = Critic(ck0["critic_dim"]).to(dev)
+        critic.load_state_dict(ck0["critic"])
+        opt_c = torch.optim.Adam(critic.parameters(), lr=a.critic_lr)
+        print(f"student, std and critic from {a.student}", flush=True)
+    opt_a = torch.optim.Adam([*student.parameters(), log_std], lr=a.lr)
     state = {"lr": a.lr, "updates": 0}
     rd0 = 0
     latest = run / "ckpt_latest.pt"
@@ -264,7 +320,8 @@ def main():
     per_round = T // S
     rng = np.random.default_rng([a.seed, rd0])
     lib = run / "round_library.pt"
-    replay = Replay(a.keep, n, T, cfg, dev)  # restarts empty on --resume
+    replay = Replay(a.keep, n, T, cfg, dev, aux_dim=cfg.aux_dim if a.aux else 0)  # restarts empty on --resume
+    fm = None
     for rd in range(rd0, a.rounds):
         t_start = time.perf_counter()
         sc, sched = sample_scenes(rng, a, n, T)
@@ -273,6 +330,11 @@ def main():
         # make_env's configure_torch_backends turns cudnn autotuning on: with a different number of unique depth
         # frames in every minibatch it re-tunes the CNN each time (4x slower updates).
         torch.backends.cudnn.benchmark = False
+        fm = FootMetrics(scan, dev) if fm is None else fm
+        fm.scan = scan
+        pscan = HeightScan(SimpleNamespace(terrains=[s_[2] for s_ in sc]), POLICY_GRID).to(dev) if a.aux else None
+        X_r = torch.zeros(n, T, cfg.aux_dim, dtype=torch.int8, device=dev) if a.aux else None
+        dt = env.step_dt
         dc = obs["policy"].shape[-1] + obs["goal"].shape[-1]
         if critic is None:
             critic = Critic(dc).to(dev)
@@ -286,7 +348,7 @@ def main():
         alive_r = torch.zeros(n, T, dtype=torch.bool, device=dev)
         up = torch.ones(n, dtype=torch.bool, device=dev)
         train_actor = rd >= a.critic_warmup and replay.idx is not None
-        rec = {"round": rd, "reward": 0.0, "alive_steps": 0}
+        rec = {"round": rd, "reward": 0.0, "alive_steps": 0, "edge": 0.0, "foothold": 0.0}
         stats, t_upd = [], 0.0
         for t0 in range(0, T, S):
             ch = {"act": torch.zeros(n, S, cfg.act_dim, device=dev), "mu": torch.zeros(n, S, cfg.act_dim, device=dev),
@@ -315,11 +377,19 @@ def main():
                     ch["mu"][:, i], ch["act"][:, i], ch["logp"][:, i] = mu, x, log_prob(mu, log_std, x)
                     ch["alive"][:, i] = alive_r[:, t] = up
                     A_r[:, t] = ch["a_tch"][:, i]
+                    if a.aux:  # target: the teacher's terrain input at this step, noise-free, as int8 cm
+                        s49 = torch.zeros(n, 49, device=dev)
+                        s49[:, :7] = buf[:, -1, :7]
+                        rel = buf[:, -1, 2:3] - pscan(s49, tiles)
+                        X_r[:, t] = ((rel - POLICY_NOMINAL) / 0.01).round().clamp(-127, 127).to(torch.int8)
                     obs, r, *_ = env.step(x)
                     now = robot_frame(cmd, origins)
                     buf = torch.cat([buf[:, 1:], now[:, None]], 1)
                     up_new = up & still_up(now, scan, tiles)
-                    rew[:, i] = r * up
+                    edge, straddle = foot_terms(fm, now, tiles, a.reach)
+                    rew[:, i] = (r - dt * (a.edge * edge + a.foothold * straddle)) * up
+                    rec["edge"] += float((edge * up).sum())
+                    rec["foothold"] += float((straddle * up).sum())
                     done[:, i] = up & ~up_new
                     up = up_new
                 last_val = critic(torch.cat([obs["policy"], obs["goal"]], -1))
@@ -334,7 +404,7 @@ def main():
             rec["reward"] += float(rew.sum())
             rec["alive_steps"] += int(ch["alive"].sum())
             k = max(0, state["updates"] - a.critic_warmup * per_round)
-            lam = max(a.dagger_floor, 1 - k / (a.anneal * per_round)) if train_actor else 1.0
+            lam = max(a.dagger_floor, a.lam0 * (1 - k / (a.anneal * per_round))) if train_actor else 1.0
             t1 = time.perf_counter()
             s = update(student, log_std, critic, opt_a, opt_c, ch, P, D, t0, lam, train_actor, replay, state, a)
             if train_actor and t0 + S < T:
@@ -344,14 +414,16 @@ def main():
             stats.append({**s, "lam": lam})
             del ch
         close_round(env, lib)
-        replay.add({"P": P.half(), "D": D, "A": A_r, "alive": alive_r})
-        del A_r, alive_r
+        replay.add({"P": P.half(), "D": D, "A": A_r, "alive": alive_r, "X": X_r})
+        del A_r, alive_r, X_r
         fam = np.array([s_[0] for s_ in sc])
         past = np.array([np.nan if s_[5] is None else s_[5] for s_ in sc])
         ok = up.cpu().numpy() & (np.isnan(past) | (buf[:, -1, 0].cpu().numpy() > np.nan_to_num(past)))
-        rec.update({k: round(float(np.mean([s_[k] for s_ in stats if k in s_])), 5) for k in ("vloss", "surr", "dagger", "dagger_chunk", "kl", "clip", "ratio0", "lam")
+        rec.update({k: round(float(np.mean([s_[k] for s_ in stats if k in s_])), 5) for k in ("vloss", "surr", "dagger", "dagger_chunk", "kl", "clip", "ratio0", "aux", "lam")
                     if any(k in s_ for s_ in stats)})
         rec["reward"] = round(rec["reward"] / max(rec["alive_steps"], 1), 5)
+        rec["edge"] = round(rec["edge"] / max(rec["alive_steps"], 1), 5)  # m of sole below nearby ground, per step
+        rec["foothold"] = round(rec["foothold"] / max(rec["alive_steps"], 1), 5)  # straddling feet per step
         rec.update({"up": round(float(up.float().mean()), 3), "pass": {f: round(float(ok[fam == f].mean()), 2) for f in sorted(set(fam))},
                     "std": round(float(log_std.exp().mean()), 4), "lr": state["lr"], "updates": state["updates"],
                     "round_s": round(time.perf_counter() - t_start), "update_s": round(t_upd)})
