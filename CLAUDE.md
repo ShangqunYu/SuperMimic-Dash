@@ -1065,6 +1065,25 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   Action MSE flat at ~0.073; 3 seeds, slow / fast: r39 304 / 416, r44 291 / 413, r49 292 / 411 (r24 300 / 425),
   all within noise. Tall-stairs course DR, 1.5 / 2.0 m/s: r39 33 / 23, r44 35 / 20, r49 **39 / 25** (r24 28 / 22,
   r29 35 / 19); stairs up remains the failure (30-35 of 64 at 2 m/s vs the teacher's 15).
+- **RL fine-tune reworked** (2026-11-16, commit cf869e9; user's go-ahead after v5 converged). PPO and the DAgger
+  term now step in two phases per update, each with its own Adam and its lr adapted to its own KL (PPO 0.01 per
+  minibatch as before; DAgger `--dagger-kl` x lam, measured on the PPO phase's last minibatch before / after its
+  `--dagger-steps` steps). In rl_v1 / v2's single step the DAgger change set the KL and pinned the lr at its floor,
+  while the PPO gradient set the direction (at std 0.1 ~20x the DAgger term's): the DAgger floor did not hold the
+  slow-speed skills. The terrain head trains with the DAgger term but by its own Adam (3e-4; it does not act).
+  `--cmd`: penalty x dt per unit of relative speed along the joystick below (1 - `--cmd-tol` 0.5) of it (0.2 s
+  mean, heading frame, from 1 s into the round), against rl_v2's stalling; v5 r49 under it: ~0.03 / step, 1-2 % of
+  steps stalled. The camera timing comes from the student checkpoint's env_kwargs. **Acting vs training forward**:
+  in eval / no_grad nn.TransformerEncoder takes its fused fast path, ~4e-4 per action off the training path
+  (float64 reference: 4e-7), and TF32 adds as much; |ratio - 1| at an update's first minibatch was 0.14 at std 0.01
+  (the 0.016 at std 0.1 in rl_v1 was the same). Both off in rl_finetune (`torch.backends.mha
+  .set_fastpath_enabled(False)`, fp32_precision "ieee" after each env build): 2e-5. Std: PHP's 0.01 tried in the
+  smoke test (128 envs): KL 0.01 per update then allows ~3e-4 rad of change (PPO lr ~3e-8) and the policy
+  gradient's signal / noise falls with the std, so 0.05 (PPO lr settles ~1.5e-7, DAgger ~1.5e-6, clip fraction
+  0.18). **rl_v3** (queued 2026-11-16 by scratchpad `launch_rl3.sh` until a GPU has 60 GB free; the other lab
+  user's jobs held both): from dagger_v5 r49 (fresh critic, aux head), 60 rounds, critic warm-up 3, `--edge 2.5
+  --foothold 0.5` (half of rl_v2's) `--cmd 4 --aux 1`, DAgger KL 0.01 -> 0.005 over 25 rounds (`--dagger-floor 0.5
+  --anneal 25`), keep 8, seed 8, v5's scene mix. Log `logs/student_rl_v3.out`, run `logs/student/rl_v3/`.
 
 ## PARC terrain data (2026-11-08, lab server)
 
