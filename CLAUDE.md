@@ -1003,6 +1003,21 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   step in 56 / 64 (clean) and 60 / 64 (DR) runs, worst depth 10-11 cm on average (flat run-up control: 3 / 64,
   0.9 cm). The teacher's robot stays out (worst ~3-4 cm, the physics stops it), so the teacher partly ignores its
   reference at the edges, and the RL tracking reward pays for following a colliding plan.
+  By phase (scratchpad `foot_clip2.py`): 17 % of the plan's *stance* frames on the stairs have a sole > 2 cm inside a
+  step (7 cm deep), 10 % of swing frames: mostly misplaced footholds (toe into the riser / foot below the tread),
+  not swing clearance.
+- **Foot guidance at sampling time does not help** (2026-11-16; `generator/guidance.py` FootClearance, a
+  `Diffusion.sample` `x0_hook`; `closed_loop.run_loop(foot_guide=...)`, `course_demo.py --foot-guide`; off by
+  default). Gradient steps on each late denoising step's x0 against the squared sole depth below the terrain (optionally
+  the max within `--guide-inflate` m). Tall-stairs course, generator + v6 teacher, 2 m/s, of 64 (clean): no
+  guidance 48; joints only (legs fold, the root height stays the plan's) 39 / 41 (inflate 3 / 0 cm; the body sank
+  0.633 -> 0.622 m on the stairs, 22 stairs-up falls); root + joints 48 (3 cm) / 54 (0 cm). Under DR, 3 seeds, of
+  192: no guidance 139 (1.5 m/s) / 108 (2 m/s); root + joints, no inflation, last 4 steps x 5 iterations 132 / 92;
+  all 20 steps x 1 iteration - / 83. The guided plans are clean (worst depth 11 -> 0.1-3 cm) but the teacher tracks
+  them worse: it was trained on the generator's / mocap's motions and compensates for their foothold errors itself;
+  a corrected plan is out of its distribution. Planning ~2.6x slower. Fixing footholds would need the tracker
+  retrained on such plans (or the generator's data / training); the student-side ideas (RL stumble / foothold
+  rewards, an auxiliary terrain-prediction loss) do not depend on it.
 
 ## PARC terrain data (2026-11-08, lab server)
 

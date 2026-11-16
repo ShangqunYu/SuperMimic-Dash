@@ -93,8 +93,11 @@ class Diffusion:
         return a.sqrt() * x0 + (1 - a).sqrt() * noise
 
     @torch.no_grad()
-    def sample(self, model: Denoiser, hist, hmap, cmd, cmd_on, steps: int = 20, guidance: float = 1.0, eta: float = 0.0, generator=None):
-        """DDIM from pure noise; inputs normalised as for forward. guidance > 1: classifier-free on the command."""
+    def sample(self, model: Denoiser, hist, hmap, cmd, cmd_on, steps: int = 20, guidance: float = 1.0, eta: float = 0.0, generator=None,
+               x0_hook=None):
+        """DDIM from pure noise; inputs normalised as for forward. guidance > 1: classifier-free on the command.
+        x0_hook(x0, i, steps) -> x0: corrects step i's clean estimate before the update (guided sampling, e.g.
+        generator/guidance.py's FootClearance)."""
         B, F, D = hist.shape[0], model.cfg.fut, model.cfg.frame_dim
         x = torch.randn(B, F, D, device=hist.device, generator=generator)
         ts = torch.linspace(self.T - 1, 0, steps, device=hist.device).round().long()
@@ -104,6 +107,8 @@ class Diffusion:
             if guidance != 1.0:
                 x0u = model(x, tt, hist, hmap, cmd, torch.zeros_like(cmd_on))
                 x0 = x0u + guidance * (x0 - x0u)
+            if x0_hook is not None:
+                x0 = x0_hook(x0, i, len(ts))
             a = self.ab[t]
             if i == len(ts) - 1:
                 x = x0

@@ -106,7 +106,8 @@ def run(a):
         R = Q.clone()
         R[..., 2] -= 50.0  # no plan: a ghost would sit far below the floor
     else:
-        Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, seed=a.seed, dr=a.dr, delay=a.dr)
+        guide = {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last, "inflate": a.guide_inflate, "joints_only": not a.guide_root} if a.foot_guide else None
+        Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, seed=a.seed, dr=a.dr, delay=a.dr, foot_guide=guide)
     res = score(Q, tiles, terr, [b[1] for b in built], [b[2] for b in built], dev)
     table = {}
     for (v, s, k), r in zip(combo, res):
@@ -122,7 +123,9 @@ def run(a):
                     fails[nxt] = fails.get(nxt, 0) + 1
             summary.setdefault(nm, {})[sp] = {"success": f"{len(v)}/{len(rs)}", "course_m_s": round(float(np.mean(v)), 2) if v else None, "failed_at": fails}
             print(f"{nm} | joystick {sp} m/s: {len(v)}/{len(rs)} @ {summary[nm][sp]['course_m_s']} m/s, failed at {fails}", flush=True)
-    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "student": a.student, "dr": a.dr, "seed": a.seed, "summary": summary,
+    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "student": a.student, "dr": a.dr, "seed": a.seed,
+                                                  "foot_guide": a.foot_guide and {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last,
+                                                                                  "inflate": a.guide_inflate, "root": a.guide_root}, "summary": summary,
                                                   "runs": table}, indent=1))
     torch.save({"robot": Q.cpu(), "plan": R.cpu(), "variants": variants, "names": names, "speeds": a.speeds, "samples": S, "combo": combo, "results": res,
                 "marks": [b[1] for b in built], "finish": [b[2] for b in built], "dr": a.dr, "student": a.student}, out / "traj.pt")
@@ -263,6 +266,12 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dr", action="store_true", help="robot + hardware DR, observation noise, 0-25 ms actuator delay (student: and the depth "
                     "camera's noise, dropouts, latency and pose)")
+    ap.add_argument("--foot-guide", action="store_true", help="guided sampling keeping the plan's soles out of the terrain (generator/guidance.py)")
+    ap.add_argument("--guide-step", type=float, default=20.0)
+    ap.add_argument("--guide-iters", type=int, default=5)
+    ap.add_argument("--guide-last", type=int, default=4, help="guided (final) denoising steps")
+    ap.add_argument("--guide-inflate", type=float, default=0.03, help="m: soles kept above the highest ground this close")
+    ap.add_argument("--guide-root", action="store_true", help="the correction may move the root too (default: joints only)")
     ap.add_argument("--student", help="run this depth student alone instead of the generator + teacher (gen_ckpt still gives the start pose)")
     ap.add_argument("--render", action="store_true", help="render runs from out/traj.pt")
     ap.add_argument("--pick", type=int, nargs=3, metavar=("VARIANT", "SPEED", "SAMPLE"))
