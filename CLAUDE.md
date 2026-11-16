@@ -1018,6 +1018,14 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   a corrected plan is out of its distribution. Planning ~2.6x slower. Fixing footholds would need the tracker
   retrained on such plans (or the generator's data / training); the student-side ideas (RL stumble / foothold
   rewards, an auxiliary terrain-prediction loss) do not depend on it.
+- **rl_v2** (2026-11-16, GPU 0; user's go-ahead for the student-side ideas): from rl_v1 r71 (its std and critic
+  too), `--lam0 0.1` (DAgger weight at the floor from the start), `--lr 5e-6 --adaptive-after 0`, 60 rounds,
+  critic warm-up 3 (the aux head fits on the frozen trunk meanwhile), `--gap-max 0.6`, rest as rl_v1. New terms:
+  `--edge 5` (per m of sole below the highest ground within 4 cm: toe against a riser) and `--foothold 1` (per foot
+  in contact straddling a > 3 cm step), both x dt like the env's reward (tracking ~0.088 / step); smoke-test rates
+  at r71: 0.004 m and 0.023 straddling feet per step. `--aux 1`: a head on the readout features predicting the
+  teacher's noise-free POLICY_GRID scan (403, int8 cm targets in the replay; MSE in the teacher's input units,
+  0.11 at the start = ~17 cm RMS). Log `logs/student_rl_v2.out`, run `logs/student/rl_v2/`.
 
 ## PARC terrain data (2026-11-08, lab server)
 
