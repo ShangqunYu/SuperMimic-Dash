@@ -1036,6 +1036,12 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   for stalling, since the generator replans from wherever the robot is every 0.2 s (a robot standing still trails
   each plan by ~10 cm at 0.5 m/s). Any further RL needs a progress / command-following term (and smaller foot
   weights), and probably its own lr control apart from the DAgger + aux terms.
+- **PHP's timing, from its code** (github.com/amazon-far/php_parkour, Holosoma pinned at 4a0bf04; checked
+  2026-11-16): policy 50 Hz (IsaacSim 200 Hz, `control_decimation=4`; inference `rl_rate=50`). Depth in training
+  is rendered every policy step into a rolling buffer and read `latency_frame (3, 4)` steps back (60-80 ms); no
+  camera frame rate or frame hold is modeled (the paper's "30 Hz" is the robot's camera; on hardware the policy
+  takes the latest frame from shared memory each step). 58x87 input, D435i on the torso pitched 27 deg. Ours:
+  a frame every 5 steps (10 Hz), 4-7 steps late (80-140 ms), so up to 220 ms old.
 
 ## PARC terrain data (2026-11-08, lab server)
 
