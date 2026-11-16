@@ -998,6 +998,11 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   r83 26 / 14 (stairs-up falls at 2 m/s 52 -> 31; more falls at the 50 cm gap, reached at ~1 m/s after slowing on
   the stairs; generator + teacher 48 / 37). Clips: `logs/course_demo/tall_rl1_083_dr/*.mp4` (2 successes, a trip
   on the stairs, a fall into the gap).
+- **The generator's plans cut through stair edges** (scratchpad `foot_clip.py`: FootMetrics sole points vs the
+  terrain under them, tall-stairs course at 2 m/s, stairs-up zone x 1.3-3.2 m): the plan's sole goes > 3 cm into a
+  step in 56 / 64 (clean) and 60 / 64 (DR) runs, worst depth 10-11 cm on average (flat run-up control: 3 / 64,
+  0.9 cm). The teacher's robot stays out (worst ~3-4 cm, the physics stops it), so the teacher partly ignores its
+  reference at the edges, and the RL tracking reward pays for following a colliding plan.
 
 ## PARC terrain data (2026-11-08, lab server)
 
