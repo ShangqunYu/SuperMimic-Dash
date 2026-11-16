@@ -114,6 +114,22 @@ class StudentRunner:
         return self.m(self.P, self.D)
 
 
+def adapt_slots(sd: dict, old: StudentCfg, new: StudentCfg) -> dict:
+    """Warm start across depth timings: a state dict for `old`'s slots -> one for `new`'s, each new depth slot's
+    embedding interpolated from the old ones by its frame's age in steps (the proprio slots unchanged)."""
+    assert old.n_proprio == new.n_proprio, (old.n_proprio, new.n_proprio)
+    if (old.n_depth, old.depth_every) == (new.n_depth, new.depth_every):
+        return sd
+    pos = sd["pos"]
+    dep = pos[0, 1 : 1 + old.n_depth].flip(0)  # youngest first
+    age = torch.arange(old.n_depth, dtype=torch.float32, device=pos.device) * old.depth_every
+    x = (torch.arange(new.n_depth, dtype=torch.float32, device=pos.device) * new.depth_every).clamp(max=float(age[-1]))
+    i = torch.searchsorted(age, x).clamp(1, old.n_depth - 1)
+    t = ((x - age[i - 1]) / (age[i] - age[i - 1]))[:, None]
+    new_dep = (dep[i - 1] * (1 - t) + dep[i] * t).flip(0)  # oldest first again
+    return {**sd, "pos": torch.cat([pos[:, :1], new_dep[None], pos[:, 1 + old.n_depth :]], 1)}
+
+
 def load_student(path: str, device: str) -> Student:
     ck = torch.load(path, map_location=device, weights_only=False)
     m = Student(StudentCfg(**ck["cfg"])).to(device)

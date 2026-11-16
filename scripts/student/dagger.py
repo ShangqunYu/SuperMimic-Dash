@@ -19,6 +19,10 @@ step). Every --eval-every rounds: eval_student.evaluate on the 15 scenes (noisy)
 ckpt_latest.pt and log.jsonl. --courses: courses.py's obstacle courses at up to 2 m/s instead of augment.py's
 single features at up to 1 m/s; the evals then add the fast suite (eval_student --suite fast). --course-share S
 mixes the two: courses in a share S of the envs, augment.py's slow scenes (--families) in the rest.
+--tall-stairs / --gap-max: courses.py's share of 15-19 cm stairs and widest gap. --depth-refresh / --depth-latency
+(policy steps): the camera model (default: a frame every 5 steps, 4-7 late; PHP's: 1, 3 4), saved in the
+checkpoint's env_kwargs; --depth-every / --n-depth: the student's depth tokens (default 5, 20: 2 s). --init from a
+checkpoint with other depth tokens interpolates its slot embeddings by frame age (model.adapt_slots).
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts/generator"))
 sys.path.insert(0, str(REPO / "scripts/student"))
 from augment import FAMILIES, command_schedule, sample_scene  # noqa: E402
+import courses  # noqa: E402
 from courses import course_schedule, sample_course  # noqa: E402
 from closed_loop import build_library, with_velocities  # noqa: E402
 from eval_student import evaluate, robot_frame, student_env  # noqa: E402
@@ -47,7 +52,7 @@ from rollout_generator import REPLAN, VEL_HALFLIFE, command_path, first_library,
 from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoint  # noqa: E402
 from supermimic.generator.data import GEN_GRID, GRID_SHAPE, from_canonical, to_canonical  # noqa: E402
 from supermimic.kinematics.rotations import heading_yaw  # noqa: E402
-from supermimic.student.model import Student, StudentCfg, StudentRunner  # noqa: E402
+from supermimic.student.model import Student, StudentCfg, StudentRunner, adapt_slots  # noqa: E402
 from supermimic.terrain.height_scan import HeightScan  # noqa: E402
 from supermimic.terrain.terrains import terrains_path  # noqa: E402
 
@@ -253,6 +258,12 @@ def main():
                     "features at up to 1 m/s (--families)")
     ap.add_argument("--flat-share", type=float, default=0.2, help="--courses: share of flat envs among the courses")
     ap.add_argument("--vmax", type=float, default=2.0, help="--courses: top joystick vx (m/s)")
+    ap.add_argument("--tall-stairs", type=float, default=0.0, help="--courses: share of stairs with 15-19 cm risers")
+    ap.add_argument("--gap-max", type=float, default=0.4, help="--courses: widest gap (m)")
+    ap.add_argument("--depth-refresh", type=int, default=None, help="camera: policy steps between depth frames")
+    ap.add_argument("--depth-latency", type=int, nargs=2, default=None, help="camera: frame latency range (policy steps)")
+    ap.add_argument("--depth-every", type=int, default=5, help="student: policy steps between depth tokens")
+    ap.add_argument("--n-depth", type=int, default=20, help="student: depth tokens in its window")
     ap.add_argument("--init", default=None, help="student checkpoint to start from (its input normalization is kept)")
     ap.add_argument("--beta0", type=float, default=1.0, help="share of envs the teacher drives in round 0 (then x beta-decay per round)")
     ap.add_argument("--eval-every", type=int, default=5)
@@ -265,6 +276,7 @@ def main():
         assert set(w) <= set(FAMILIES), w
         FAMILIES.clear()
         FAMILIES.update({k: v / sum(w.values()) for k, v in w.items()})
+    courses.TALL_SHARE, courses.GAP = a.tall_stairs, (courses.GAP[0], a.gap_max)
     dev = a.device
     run = Path(a.run)
     run.mkdir(parents=True, exist_ok=True)
@@ -272,14 +284,20 @@ def main():
     st = standing_frame(first_library(gck), dev)
     teacher, pcfg = load_policy_from_checkpoint(a.teacher, dev)
     env_kw = goal_env_kwargs(pcfg)
-    cfg = StudentCfg()
+    if a.depth_refresh is not None:
+        env_kw["depth_refresh_steps"] = a.depth_refresh
+    if a.depth_latency is not None:
+        env_kw["depth_latency_steps"] = tuple(a.depth_latency)
+    cfg = StudentCfg(depth_every=a.depth_every, n_depth=a.n_depth)
     student = Student(cfg).to(dev)
     opt = torch.optim.AdamW(student.parameters(), lr=a.lr, weight_decay=0.01)
     T = int(a.seconds * 50)
     replay = Replay(a.keep, a.envs, T, cfg, dev)
     rd0, step = 0, 0
     if a.init:
-        student.load_state_dict(torch.load(a.init, map_location=dev, weights_only=False)["model"])
+        ck0 = torch.load(a.init, map_location=dev, weights_only=False)
+        sd = {k: v for k, v in ck0["model"].items() if not k.startswith("aux.")}  # an rl_finetune --aux head
+        student.load_state_dict(adapt_slots(sd, StudentCfg(**{**ck0["cfg"], "aux_dim": 0}), cfg))
         print(f"initialized from {a.init}", flush=True)
     if a.resume and (run / "ckpt_latest.pt").exists():
         ck = torch.load(run / "ckpt_latest.pt", map_location=dev, weights_only=False)

@@ -15,7 +15,7 @@ Differences from mjlab's BeyondMimic re-implementation (``mjlab.tasks.tracking``
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as base_mdp
@@ -112,6 +112,10 @@ class SuperMimicEnvCfgArgs:
     # (envs/mdp/depth.py; stereo noise, dropouts and latency with obs_noise, mount DR with
     # domain_randomization). Dash only.
     depth: bool = False
+    # Depth timing in policy steps (None: envs/mdp/depth.py's DEPTH, a frame every 5 steps, 4-7 steps late).
+    # PHP's (a frame every step, 3-4 late): depth_refresh_steps=1, depth_latency_steps=(3, 4).
+    depth_refresh_steps: int | None = None
+    depth_latency_steps: tuple[int, int] | None = None
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
@@ -166,7 +170,12 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
     if a.depth:
         if robot.name != "dash":
             raise ValueError("depth needs the dash robot (its RealSense)")
-        observations["depth"] = sm_depth.depth_observation_group(noisy=a.obs_noise)
+        dcfg = sm_depth.DEPTH
+        if a.depth_refresh_steps is not None:
+            dcfg = replace(dcfg, refresh_steps=a.depth_refresh_steps)
+        if a.depth_latency_steps is not None:
+            dcfg = replace(dcfg, latency_steps=tuple(a.depth_latency_steps))
+        observations["depth"] = sm_depth.depth_observation_group(noisy=a.obs_noise, cfg=dcfg)
         # The student's proprioception: the policy group's terms for this step only (its own noise draw).
         observations["proprio"] = ObservationGroupCfg(terms=proprio_terms(), concatenate_terms=True, enable_corruption=a.obs_noise)
 
