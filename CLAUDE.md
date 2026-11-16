@@ -990,6 +990,14 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   (dagger.Replay), PPO stays on the chunk. **rl_v1** (GPU 0, from v4 r30, seed 4): v4's mix (`--courses
   --course-share 0.5`, v2 families) with `--vmax 2.5 --tall-stairs 0.5 --gap-max 0.5`, 100 rounds, critic-only
   rounds 0-2, lam_D to 0.1 by round 53; log `logs/student_rl_v1.out`, run `logs/student/rl_v1/`.
+  Result (2026-11-15/16, 7 h): the adaptive lr sat at its 5e-6 floor from update 150 on (KL ~0.016 even there);
+  training share up 0.86 -> 0.90, reward 0.0875 -> 0.0888 / step. 3 seeds, slow / fast (v4 r30 296 / 397):
+  r43 286 / 423, r63 280 / **432**, r71 287 / 421, r83 272 / 427, r99 261 / 414. Gained at speed: stairs up 18 cm
+  4 -> 7-10, rough blocks 0-20 cm 11 -> 16-22, stairs up / down 14 cm, gaps; lost at 0.5 m/s: sidestep 20 -> 0-17
+  (r99 0 / 24), stairs up 10 cm 23 -> 14-20. Tall-stairs course, DR, 1.5 / 2.0 m/s of 64: v4 25 / 5, r63 20 / 13,
+  r83 26 / 14 (stairs-up falls at 2 m/s 52 -> 31; more falls at the 50 cm gap, reached at ~1 m/s after slowing on
+  the stairs; generator + teacher 48 / 37). Clips: `logs/course_demo/tall_rl1_083_dr/*.mp4` (2 successes, a trip
+  on the stairs, a fall into the gap).
 
 ## PARC terrain data (2026-11-08, lab server)
 

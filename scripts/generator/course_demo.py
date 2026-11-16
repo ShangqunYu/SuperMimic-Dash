@@ -190,7 +190,13 @@ def render_runs(a):
                 m.geom_matid[g] = -1
                 m.geom_rgba[g] = (0.60, 0.66, 0.78, 1.0)
         q50 = tr["robot"][i].numpy().astype(np.float64)
-        end = min(len(q50), int(((res[i]["finish_s"] or len(q50) / 50) + a.tail) * 50))
+        stop = res[i]["finish_s"] or res[i]["down_at_s"] or len(q50) / 50  # a failure ends --tail s after the fall
+        end = min(len(q50), int((stop + a.tail) * 50))
+        if res[i]["success"]:
+            outcome = f"result: whole course at {res[i]['course_m_s']:.2f} m/s"
+        else:
+            where = next((mk for mk in ("stairs up", "gap", "platform", "stairs down") if mk not in res[i]["passed"]), "the end")
+            outcome = f"result: fell at the {where}" + (f" ({res[i]['down_at_s']:.1f} s)" if res[i]["down_at_s"] else "")
         Q, Rp = resample(q50[:end], 50, 1.0), resample(tr["plan"][i].numpy().astype(np.float64)[:end], 50, 1.0)
         p = Q[:, :3]
         look = np.stack([gaussian_filter1d(p[:, 0], 0.4 * FPS, mode="nearest"), gaussian_filter1d(p[:, 1], 0.6 * FPS, mode="nearest"),
@@ -207,9 +213,10 @@ def render_runs(a):
         pert = mujoco.MjvPerturb()
         key = m.light("key").id
         kd = m.light_dir[key] / np.linalg.norm(m.light_dir[key])
-        who = "depth student policy (one network: depth camera + proprioception)" if tr.get("student") else "motion generator + tracking policy"
-        head = f"Dash: {who}{', domain randomization + sensor noise' if tr['dr'] else ''}"
+        who = "depth student (one network: depth camera + proprioception)" if tr.get("student") else "motion generator + tracking policy"
+        head = f"Dash: {who}"
         sub = f"stairs {rise * 100:.0f} cm up, {gap * 100:.0f} cm gap, {plat * 100:.0f} cm platform, stairs down"
+        sub += "   (domain randomization + sensor noise)" if tr["dr"] else ""
 
         def frames():
             for t in range(len(Q)):
@@ -231,8 +238,9 @@ def render_runs(a):
                 dr.text((h // 30, h // 40), head, fill=(30, 34, 40), font=font)
                 dr.text((h // 30, h // 40 + h // 22), sub, fill=(60, 66, 76), font=font2)
                 dr.text((h // 30, h // 40 + 2 * h // 22), f"joystick {tr['speeds'][s]:.1f} m/s   robot {vel[t]:.1f} m/s", fill=(60, 66, 76), font=font2)
+                dr.text((h // 30, h // 40 + 3 * h // 22), outcome, fill=(40, 120, 60) if res[i]["success"] else (170, 50, 40), font=font2)
                 if a.ghost:
-                    dr.text((h // 30, h // 40 + 3 * h // 22), "green ghost: the generator's plan", fill=(40, 140, 70), font=font2)
+                    dr.text((h // 30, h // 40 + 4 * h // 22), "green ghost: the generator's plan", fill=(40, 140, 70), font=font2)
                 yield np.asarray(im)
             r.close()
 
