@@ -1026,6 +1026,16 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   at r71: 0.004 m and 0.023 straddling feet per step. `--aux 1`: a head on the readout features predicting the
   teacher's noise-free POLICY_GRID scan (403, int8 cm targets in the replay; MSE in the teacher's input units,
   0.11 at the start = ~17 cm RMS). Log `logs/student_rl_v2.out`, run `logs/student/rl_v2/`.
+  Result: the aux head learned the terrain (MSE 0.11 -> 0.016, ~6 cm RMS) but the foot terms barely moved
+  (straddling feet / step 0.052 -> ~0.045, edge 0.009 -> ~0.0065); lr at its 5e-6 floor again (KL ~0.015). 3 seeds,
+  slow / fast (rl_v1 r71 287 / 421): r31 274 / 408, r47 260 / **426** (fast stairs up 18 cm 16 / 24, best yet),
+  r59 239 / 420. Tall-stairs course DR, 1.5 / 2.0 m/s of 64 (rl_v1 r71 25 / 8, r83 26 / 14; generator + teacher
+  48 / 37): r31 27 / 7, r47 21 / 15, r59 **35** / 13. **Reward hacking at slow speed**: r59's slow stairs up
+  10 / 14 cm fell to 4 / 6 of 24 with no falls; 13 of 24 runs on 10 cm stairs stop within 0.9 m of the start,
+  before the first riser. The foot penalties make nearing a step costly, and the tracking reward hardly charges
+  for stalling, since the generator replans from wherever the robot is every 0.2 s (a robot standing still trails
+  each plan by ~10 cm at 0.5 m/s). Any further RL needs a progress / command-following term (and smaller foot
+  weights), and probably its own lr control apart from the DAgger + aux terms.
 
 ## PARC terrain data (2026-11-08, lab server)
 
