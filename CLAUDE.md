@@ -1041,7 +1041,17 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   is rendered every policy step into a rolling buffer and read `latency_frame (3, 4)` steps back (60-80 ms); no
   camera frame rate or frame hold is modeled (the paper's "30 Hz" is the robot's camera; on hardware the policy
   takes the latest frame from shared memory each step). 58x87 input, D435i on the torso pitched 27 deg. Ours:
-  a frame every 5 steps (10 Hz), 4-7 steps late (80-140 ms), so up to 220 ms old.
+  a frame every 5 steps (10 Hz), 4-7 steps late (80-140 ms), so up to 220 ms old. PHP's student is memoryless:
+  `DepthOnlyFCBackbone58x87Small` (3 conv + GAP -> 32, num_frames 1) on the single delayed image, concatenated with
+  this step's proprio + one-hot command (`history_length=1`), MLP 2048-1024-512-256-128; no GRU, no frame stack.
+  PPO `init_noise_std=0.01` (ours 0.1), 2 epochs x 96 minibatches, `dagger_loss_coef 10`, `dagger_end_epoch 10000`.
+- **dagger_v5** (2026-11-16, GPU 0; user's choice: PHP's camera timing, the last 10 frames): camera a frame every
+  step, 3-4 steps late (60-80 ms; `--depth-refresh 1 --depth-latency 3 4`, saved in env_kwargs); student tokens
+  every step, 10 of them (0.2 s; `--depth-every 1 --n-depth 10`), proprio window unchanged (25 steps). Init rl_v1
+  r71 (slot embeddings interpolated by frame age, `model.adapt_slots`), beta0 0.5, seed 6, 30 rounds, `--keep 8`
+  (a round's depth is now 3.8 GB on the GPU), v4's mix + `--vmax 2.5 --tall-stairs 0.5 --gap-max 0.6`. Smoke test
+  (512 envs): collection time unchanged by the per-step depth processing; the r71 warm start's action MSE under
+  the new timing 0.18 -> 0.10 after 100 iterations. Log `logs/student_dagger_v5.out`.
 
 ## PARC terrain data (2026-11-08, lab server)
 
