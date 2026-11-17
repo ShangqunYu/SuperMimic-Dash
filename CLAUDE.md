@@ -1084,6 +1084,16 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   user's jobs held both): from dagger_v5 r49 (fresh critic, aux head), 60 rounds, critic warm-up 3, `--edge 2.5
   --foothold 0.5` (half of rl_v2's) `--cmd 4 --aux 1`, DAgger KL 0.01 -> 0.005 over 25 rounds (`--dagger-floor 0.5
   --anneal 25`), keep 8, seed 8, v5's scene mix. Log `logs/student_rl_v3.out`, run `logs/student/rl_v3/`.
+  Result (GPU 1, 18:21-23:03, ~4.4 min / round on the shared GPU; a Warp CUDA error 700 in mjlab's sensor context
+  at round 55's env build, GPU nearly full, resumed with `--resume`, log `logs/student_rl_v3b.out`): stable, PPO KL
+  ~0.0137 / clip 0.17 throughout, DAgger KL on its 0.01 -> 0.005 target, aux MSE 0.026 -> 0.0084 (~4.4 cm RMS);
+  training share up flat at ~0.90, stalled steps flat at ~1.8 %, action MSE to the teacher flat at ~0.066 (the
+  policy stayed near its DAgger solution). 3 seeds, slow / fast (v5 r49 292 / 411): r23 292 / 419, r35 **296 /
+  424**, r55 294 / 415, r59 287 / 420; no slow-speed loss this time (sidestep 21-23 of 24, stairs up 10 cm 20-24),
+  fast stairs up 18 cm 7 -> 8-12. Tall-stairs course DR, 1.5 / 2.0 m/s of 64 (v5 r49 39 / 25; generator + teacher
+  48 / 37): r23 38 / 29, r35 34 / **30**, r55 38 / 23, r59 **40** / 28; stairs-up falls at 2 m/s 35 -> 22-29.
+  Gains of +3-5 / 64 at 2 m/s are about one binomial SD (~4): the fixes work (no hacking, no forgetting) but at
+  this trust region (std 0.05, KL 0.01) 60 rounds moved the policy little.
 
 ## PARC terrain data (2026-11-08, lab server)
 
