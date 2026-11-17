@@ -110,16 +110,16 @@ def sample_scenes(rng, a, n: int, T: int):
     return sc, np.stack([command_schedule(rng, s[0], T, a.sidestep) for s in sc])
 
 
-def open_round(sc, st, gen, env_kw, lib: Path, T: int, seed: int, dev: str):
-    """The student's env (training conditions) with one scene per env, each robot standing at its start.
-    -> env, cmd, obs, scan, tiles, origins."""
+def open_round(sc, st, gen, env_kw, lib: Path, T: int, seed: int, dev: str, depth: bool = True):
+    """The student's env (training conditions; depth off: nothing rendered) with one scene per env, each robot
+    standing at its start. -> env, cmd, obs, scan, tiles, origins."""
     n = len(sc)
     terr = [s[2] for s in sc]
     tiles = torch.arange(n, device=dev)
     start = st.repeat(n, 1)
     start[:, 2] += torch.tensor([s[3] for s in sc], device=dev)
     build_library(lib, terr, tiles.tolist(), start, T + 2 * gen.cfg.fut)
-    env, cmd, obs = student_env(lib, n, seed, True, env_kw, dev)
+    env, cmd, obs = student_env(lib, n, seed, True, env_kw, dev, depth)
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(dev)
     return env, cmd, obs, scan, tiles, env.scene.env_origins
 

@@ -40,14 +40,15 @@ from supermimic.student.model import Student, StudentRunner, load_student  # noq
 from supermimic.terrain.height_scan import HeightScan  # noqa: E402
 from supermimic.terrain.terrains import Terrain, load_terrains, terrains_path  # noqa: E402
 
-def student_env(lib: Path, n: int, seed: int, noisy: bool, env_kw: dict, dev: str):
-    """Env on a closed_loop-style library (one standing clip per env), depth on, terminations off; env_kw: the
+def student_env(lib: Path, n: int, seed: int, noisy: bool, env_kw: dict, dev: str, depth: bool = True):
+    """Env on a closed_loop-style library (one standing clip per env), depth on (off: the robot still carries the
+    camera, nothing rendered), terminations off; env_kw: the
     teacher's goal layout and contacts (goal_env_kwargs; the student ignores the goal, the teacher reads it); noisy:
     the student's training conditions."""
     load_terrains.cache_clear()  # cached by path: a rebuilt library must not reuse an earlier call's terrains
     env = make_env(SuperMimicEnvCfgArgs(npz_files=[str(lib)], robot="dash", num_envs=n, compact_library=True, **env_kw, episode_length_s=1e5,
                                         action_noise_std=0.0, obs_noise=noisy, reset_noise=False, domain_randomization=noisy, hardware_dr=noisy,
-                                        command_delay=noisy, depth=True, sampling_mode="start", seed=seed, root_height_threshold=1e3,
+                                        command_delay=noisy, depth=depth, realsense=True, sampling_mode="start", seed=seed, root_height_threshold=1e3,
                                         root_tilt_threshold=1e3, record_transitions=False), device=dev)
     cmd = env.command_manager.get_term("motion")
     cmd.forced_frame[:] = cmd.library.clip_start[torch.arange(n, device=dev)]

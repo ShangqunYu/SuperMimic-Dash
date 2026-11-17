@@ -116,6 +116,8 @@ class SuperMimicEnvCfgArgs:
     # PHP's (a frame every step, 3-4 late): depth_refresh_steps=1, depth_latency_steps=(3, 4).
     depth_refresh_steps: int | None = None
     depth_latency_steps: tuple[int, int] | None = None
+    # The RealSense's mass and jig without the camera sensor (a teacher acting on the student's robot); depth implies it.
+    realsense: bool = False
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
@@ -294,7 +296,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": robot.foot_geom_regex, "com_body_name": robot.com_body, "hardware_xi": a.hardware_dr,
                                                         "terrain_xi": terrains is not None})
 
-    robot_kw = {**({"command_delay": True} if a.command_delay else {}), **({"realsense": True} if a.depth else {})}
+    robot_kw = {**({"command_delay": True} if a.command_delay else {}), **({"realsense": True} if a.depth or a.realsense else {})}
     cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(terrain=terrain_entity_cfg(terrains.num_slots if terrains is not None else None), num_envs=a.num_envs, entities={"robot": robot.entity_cfg(**robot_kw)},
                        sensors=(sm_depth.depth_camera_cfg(),) if a.depth else ()),
