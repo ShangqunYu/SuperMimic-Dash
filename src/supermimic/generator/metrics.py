@@ -97,7 +97,35 @@ def edge_penetration(scan: HeightScan, p: torch.Tensor, tile: torch.Tensor, radi
         h = scan.lookup(qx.reshape(n, -1), qy.reshape(n, -1), tile).reshape(n, P, -1)
         lip = torch.maximum(h[..., 1:], h[..., :-1])
         b = (cells[..., 1:] + cells[..., :-1]) / 2  # boundary coordinates
-        d = torch.sqrt((c - b) ** 2 + (z - lip) ** 2)
+        d = torch.sqrt((c - b) ** 2 + (z - lip) ** 2 + 1e-12)  # differentiable in p (imagination's EdgeTerm)
         pen = torch.where((h[..., 1:] - h[..., :-1]).abs() > step, (radius - d).clamp_min(0), torch.zeros_like(d))
         out = torch.maximum(out, pen.amax(-1))
     return out
+
+
+class EdgeTerm:
+    """edge_penetration as a reward penalty on world-model states (imagination; gradients reach the actions):
+    dt x weight x sum over k points along each foot capsule of (depth inside the lip cylinder, radius + the capsule's)
+    x (the point's speed + 1e-6), speeds from the state's velocities through FK."""
+
+    def __init__(self, fk: Kinematics, terrains, weight: float, dt: float, radius: float = 0.05, step: float = 0.03, k: int = 12):
+        foot = FootMetrics(None, fk.device)
+        self.fk, self.weight, self.dt, self.step = fk, weight, dt, step
+        self.radius = radius + foot.radius
+        self.feet = fk.body_indices(["l_foot", "r_foot"])
+        w = torch.linspace(0, 1, k, device=foot.ends.device)[:, None]
+        self.local = foot.ends[:, 0:1] * (1 - w) + foot.ends[:, 1:2] * w  # (2 feet, k, 3) body frame
+        self.scan = HeightScan(terrains).to(foot.ends.device)
+
+    def __call__(self, s: torch.Tensor, tile: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """s (n, 13 + 2 NJ) states, tile (n,) -> (penalty (n,), the deepest point's depth (n,), detached)."""
+        n, nq = s.shape[0], self.fk.nq
+        out = self.fk(s[..., :nq], s[..., nq:])
+        p, q = out["pos"][:, self.feet], out["quat"][:, self.feet]  # (n, 2, 3 / 4)
+        v, w = out["lin_vel"][:, self.feet], out["ang_vel"][:, self.feet]
+        r = quat_apply(q[:, :, None].expand(-1, -1, self.local.shape[1], -1), self.local.expand(n, -1, -1, -1))  # (n, 2, k, 3)
+        pts = (p[:, :, None] + r).reshape(n, -1, 3)
+        vel = (v[:, :, None] + torch.linalg.cross(w[:, :, None].expand_as(r), r, dim=-1)).reshape(n, -1, 3)
+        pen = edge_penetration(self.scan, pts, tile, self.radius, self.step)
+        speed = torch.sqrt((vel**2).sum(-1) + 1e-12)
+        return self.dt * self.weight * (pen * (speed + 1e-6)).sum(-1), pen.detach().amax(-1)

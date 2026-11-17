@@ -43,6 +43,12 @@ class PolicyTrainerCfg:
     # Official: clamp the critic's bootstrap value and its GAE targets to the largest possible return,
     # max_step_reward / (1 - gamma).
     value_clamp: bool = True
+    # Teacher: the "Hiking in the Wild" edge penalty in the imagined reward (generator/metrics.py EdgeTerm; 0 = off):
+    # weight per (m inside a lip cylinder x m/s) summed over edge_points points per foot capsule.
+    edge_vol: float = 0.0
+    edge_radius: float = 0.05
+    edge_step: float = 0.03
+    edge_points: int = 12
 
 
 class VelocityImagination:
@@ -68,6 +74,12 @@ class PolicyTrainer:
 
             assert wm.terrains is not None, "policy_scan needs the world model's terrains"
             self.policy_scan = HeightScan(wm.terrains, POLICY_GRID).to(lib.default_joint_pos.device)
+        self.edge = None
+        if cfg.edge_vol:
+            from supermimic.generator.metrics import EdgeTerm
+
+            assert wm.terrains is not None, "edge_vol needs the world model's terrains"
+            self.edge = EdgeTerm(wm.heads.fk, wm.terrains, cfg.edge_vol, wm.heads.reward_cfg.dt, cfg.edge_radius, cfg.edge_step, cfg.edge_points)
         if velocity is not None:
             self.vel_critic_opt = Optimizers([velocity.critic], cfg.critic_lr, muon=cfg.muon)
             self.vel_step_fn = VelStep(wm, lib.default_joint_pos, velocity.cfg, compile_mode=cfg.compile)
@@ -136,7 +148,7 @@ class PolicyTrainer:
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
         ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs,
-                     policy_scan=self.policy_scan, goal_stride=cfg.goal_stride, goal_root_ori=cfg.goal_root_ori)
+                     policy_scan=self.policy_scan, goal_stride=cfg.goal_stride, goal_root_ori=cfg.goal_root_ori, edge=self.edge)
         feat, goals, e_root = self._critic_inputs(ro)
         ctx = self.wm.context(ro.states, start.xi)  # (H+1, n, ctx): normalised xi (+ height scan)
         if cfg.use_critic:

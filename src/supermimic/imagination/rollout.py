@@ -59,9 +59,12 @@ def imagine(
     policy_scan=None,
     goal_stride: int = 1,
     goal_root_ori: bool = False,
+    edge=None,
 ) -> ImagRollout:
     """policy_scan: a HeightScan on POLICY_GRID for a teacher policy (terrain at the end of its goal).
-    goal_root_ori: the goal frames' root orientation relative to the imagined root (gradients flow through it)."""
+    goal_root_ori: the goal frames' root orientation relative to the imagined root (gradients flow through it).
+    edge: an EdgeTerm (generator/metrics.py), subtracted from each step's reward (reward_terms 'edge_vol', and
+    'edge_hit': the share of steps with a foot point inside a lip cylinder)."""
     device = start.state.device
     n = start.state.shape[0]
     q0 = lib.default_joint_pos
@@ -75,7 +78,8 @@ def imagine(
             return o + (torch.rand_like(o) * 2 - 1) * noise_half
         return o
 
-    tile = wm.spec.tile_of(start.xi) if policy_scan is not None else None
+    tile = wm.spec.tile_of(start.xi) if policy_scan is not None or edge is not None else None
+    edge_sum = torch.zeros(2, device=device)
 
     def make_goal(frame_t, ref_t, anchor_pose, s_t):
         # Same layout as the env's goal group: future frames, their root orientation, anchor terms, terrain scan.
@@ -128,6 +132,10 @@ def imagine(
         d = torch.sigmoid(logits)
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)
+        if edge is not None:
+            pen, deepest = edge(s_next, tile)
+            r = r - pen
+            edge_sum += torch.stack([pen.detach().mean(), (deepest > 0).float().mean()])
 
         frame = frames_all[t + 1]
         ref = ref_at(t + 1)
@@ -152,7 +160,8 @@ def imagine(
         goals=torch.stack(goals),
         e_root=torch.stack(e_roots),
         frames=torch.stack(frames),
-        reward_terms={k: float(v / horizon) for k, v in zip(REWARD_TERM_NAMES, term_sum.tolist())},
+        reward_terms={k: float(v / horizon) for k, v in zip(REWARD_TERM_NAMES + (("edge_vol", "edge_hit") if edge is not None else ()),
+                                                             (term_sum.tolist() + (edge_sum.tolist() if edge is not None else [])))},
     )
 
 
