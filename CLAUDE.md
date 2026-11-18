@@ -1094,6 +1094,28 @@ warm-up first) is a possible later step if the DAgger student falls short of the
   48 / 37): r23 38 / 29, r35 34 / **30**, r55 38 / 23, r59 **40** / 28; stairs-up falls at 2 m/s 35 -> 22-29.
   Gains of +3-5 / 64 at 2 m/s are about one binomial SD (~4): the fixes work (no hacking, no forgetting) but at
   this trust region (std 0.05, KL 0.01) 60 rounds moved the policy little.
+- **Edge penalty from "Hiking in the Wild"** (2026-11-17; arXiv 2601.07718, code in InstinctLab, not instinct_rl:
+  `volume_points_penetration`, weight -4, sum over a 10x5x2 grid of volume points per ankle link of (inside an edge
+  cylinder) x (|v| + 1e-6) x depth; edges = mesh edges with dihedral > 70 deg, cylinders r 0.05; plus `feet_at_plane`
+  -0.1). Port (commit f2e075f, `generator/metrics.py` `edge_penetration` / `EdgeTerm`): lips are heightfield cell
+  boundaries with a jump > 3 cm, at the upper height, searched along x in the point's row and y in its column (box
+  corners rounded, concave corners missed); 12 points along each foot capsule's axis, cylinder r 0.05 + the capsule's
+  1.25 cm; weight 33 (~4 x 100 points / 12). Physics-side metric: scratchpad `edge_metric.py` on course_demo traj.pt
+  (share of steps with a foot point in a cylinder, edge_vol per step; v6 on the tall course's stairs up: ~0.41, 0.06).
+  - **PPO teacher fine-tune in the closed loop** (`scripts/student/teacher_rl.py`: rl_finetune's PPO on the v6
+    teacher, depth off): at std 0.05 / KL 0.01 the 8.7M MLP barely moved (0.15 % weight change in 6 rounds); at std
+    0.1 / KL 0.02 (edge_v2 / ctrl_v2, 20 rounds) both runs lost the sidestep (21 -> 0) and stairs, edge term or not.
+    Abandoned.
+  - **In imagination** (commit 2bb8c4c, `--policy-trainer.edge-vol 33`: reward minus the term on world-model states,
+    gradients through FK; ~1 it/s vs 3 without). **dash_teacher_v7_edge / v7_ctrl**: from v6 50k, 12k it, lr 3e-5
+    (policy, critic, world model), v6's flags otherwise (scratchpad `launch_v7.sh`). Imagined edge hit 18 % -> 6.7 %,
+    train return unchanged (~0.63). 3 seeds (scratchpad `eval_trl.sh`, `logs/teacher_rl/eval/<tag>_*`), ctrl / edge
+    at 3k, 6k, 12k (v6): tall course DR 1.5 m/s 121, 134, 128 / 132, 139, 134 (133) of 192; **2.0 m/s 104, 81, 88 /
+    115, 113, 117 (103), stairs-up falls 78, 99, 86 / 55, 61, 60 (74)**; 15 scenes DR + delay 303, 294, 282 / 275,
+    291, 298 (295) of 360; stairs up 18 cm 15, 12, 4 / 9, 12, 17 (9); **platform up 30 cm 15, 11, 14 / 4, 9, 6 (13)**;
+    course edge_vol at 1.5 m/s 0.033, 0.032, 0.034 / 0.022, 0.020, 0.020 (0.033), stairs-up hit 0.41 / 0.31 at 12k.
+    The term transfers (-40 % edge contact, consistent at every checkpoint), fast stairs up improves, platform up
+    30 cm pays. **Best teacher now: `logs/dash_teacher_v7_edge/ckpt_0012000.pt`** (no student distilled from it yet).
 
 ## PARC terrain data (2026-11-08, lab server)
 
