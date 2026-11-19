@@ -1117,6 +1117,36 @@ warm-up first) is a possible later step if the DAgger student falls short of the
     The term transfers (-40 % edge contact, consistent at every checkpoint), fast stairs up improves, platform up
     30 cm pays. **Best teacher now: `logs/dash_teacher_v7_edge/ckpt_0012000.pt`** (no student distilled from it yet).
 
+## Stairs-only tracker with the edge penalty (2026-11-19, lab server)
+
+User's decision: narrow the scope to stairs up / down and train a tracker from scratch with the edge penalty on,
+next to an identical control without it, to see whether the tracker keeps its feet off stair lips. Gaps left for
+a later round (no labelled gap clips; PARC gap jumps would have to be found by searching terrains for pits).
+- **Edge term compiled** (`imagination/compiled.py` ImagStep `edge=`): the step returns the feet from the reward's
+  own FK and `EdgeTerm.from_feet` runs as its own compiled graph: 2.9 it/s with the term (eager 1.0, without it
+  3.0), imagined edge_hit / edge_vol equal to eager's. Compiled *inside* the step's graph the policy update went NaN
+  at the first update (the term compiled alone matches eager values and gradients; not pinned down further).
+- **Library `data/library/dash_stairs_v1.pt`** (`scripts/data/build_stairs_library.py`): v5's stairs clips (mocap
+  286, PARC 194; 0.81 h), physics-augmented stairs runs sampled from aug3a / aug4a (up 1,907, 5.83 h) and aug3a /
+  aug4a / aug4b (down 1,623, 4.96 h), flat locomotion 2.9 h (20 %); 14.5 h, 4,010 terrains, 14 box slots (v5: 66).
+  Held out (base-motion hash mod 20, as GenData): `dash_stairs_v1_eval.pt`, 216 clips (mocap 46, aug up 93, down 77).
+- **The references' own edge contact** (`scripts/diag/ref_edge.py`; share of frames with a foot point in a 5 cm
+  lip cylinder, edge_vol per frame): mocap stairs 0.75 / 0.018 (eval 0.86 / 0.033: human feet sit on the lips,
+  2-3 cm deep), PARC 0.36 / 0.027, aug up 0.28 / 0.016, aug down 0.25 / 0.019 (the v6 robot's own placements).
+- **Tracking the held-out pack in physics** (`scripts/eval_edge.py`: `run_benchmark(edge=True)`, nominal physics;
+  failed / mean return / edge hit / edge_vol):
+
+  | | mocap stairs (46) | aug stairs up (93) | aug stairs down (77) |
+  |---|---|---|---|
+  | v6 50k | 0 / 0.934 / 0.82 / 0.064 | 10 / 0.843 / 0.33 / 0.016 | 15 / 0.861 / 0.21 / 0.020 |
+  | v7_ctrl 12k | 0 / 0.936 / 0.85 / 0.063 | 14 / 0.843 / 0.34 / 0.016 | 17 / 0.860 / 0.21 / 0.018 |
+  | v7_edge 12k | 0 / 0.891 / **0.32 / 0.004** | 17 / 0.834 / 0.25 / 0.008 | 6 / 0.857 / 0.19 / 0.012 |
+
+  The fine-tuned edge tracker already leaves the mocap's lip footholds (-94 % edge_vol for -0.045 return). On the
+  aug climbs every tracker lags the reference (v6: max root distance median 1.1 m on stairs up, 0.35 m down; mocap
+  0.11 m): it climbs slower than its own recorded runs and never catches up on the flat top (global root term
+  0.5 x exp(-d^2 / 0.3^2) gives nothing back once ~0.5 m behind). Failures there are falls after lagging.
+
 ## PARC terrain data (2026-11-08, lab server)
 
 Source with real terrain, replacing fitted terrain. PARC (Xu, Shi, Yin, Peng, SIGGRAPH 2025; MIT):

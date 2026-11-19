@@ -67,7 +67,6 @@ class PolicyTrainer:
         self.v_max = wm.heads.reward_cfg.max_step_reward / (1.0 - cfg.gamma) if cfg.value_clamp else float("inf")
         from supermimic.imagination.compiled import ImagStep, VelStep
 
-        self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile)
         self.policy_scan = None
         if cfg.policy_scan:
             from supermimic.terrain.height_scan import POLICY_GRID, HeightScan
@@ -80,6 +79,7 @@ class PolicyTrainer:
 
             assert wm.terrains is not None, "edge_vol needs the world model's terrains"
             self.edge = EdgeTerm(wm.heads.fk, wm.terrains, cfg.edge_vol, wm.heads.reward_cfg.dt, cfg.edge_radius, cfg.edge_step, cfg.edge_points)
+        self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile, edge=self.edge)
         if velocity is not None:
             self.vel_critic_opt = Optimizers([velocity.critic], cfg.critic_lr, muon=cfg.muon)
             self.vel_step_fn = VelStep(wm, lib.default_joint_pos, velocity.cfg, compile_mode=cfg.compile)

@@ -76,16 +76,21 @@ class FootMetrics:
         }
 
 
-def edge_penetration(scan: HeightScan, p: torch.Tensor, tile: torch.Tensor, radius: float, step: float = 0.03) -> torch.Tensor:
+def edge_cells(scan: HeightScan, radius: float) -> int:
+    """Cells each way along x / y that edge_penetration searches for a lip within radius."""
+    return int(math.ceil(radius / float(scan.dx[1:].min()))) + 1 if len(scan.dx) > 1 else 1
+
+
+def edge_penetration(scan: HeightScan, p: torch.Tensor, tile: torch.Tensor, radius: float, step: float = 0.03, k: int | None = None) -> torch.Tensor:
     """Points p (n, P, 3) in the terrain frame of terrains tile (n,) -> (n, P) depth of each point inside a cylinder
     of `radius` around the nearest step lip ("Hiking in the Wild"'s edge cylinders, on a heightfield): a cell boundary
     where the height jumps by more than `step`, the lip on it at the upper height. Searched along x in the point's
     cell row and along y in its column, out to `radius`; a lip counts as running the whole boundary (box corners are
-    rounded off)."""
+    rounded off). k: cells searched each way (default from the radius and the finest grid; pass it under torch.compile)."""
     n, P, _ = p.shape
     idx = (tile.round().long() + 1).clamp(0, scan.start.shape[0] - 1)
     p0, dx = scan.p0[idx][:, None, None, :], scan.dx[idx][:, None, None]  # (n, 1, 1, 2), (n, 1, 1)
-    k = int(math.ceil(radius / float(scan.dx[1:].min()))) + 1 if len(scan.dx) > 1 else 1
+    k = edge_cells(scan, radius) if k is None else k
     off = torch.arange(-k, k + 1, device=p.device, dtype=p.dtype)
     z = p[..., 2:3]
     out = torch.zeros(n, P, device=p.device, dtype=p.dtype)
@@ -116,16 +121,21 @@ class EdgeTerm:
         w = torch.linspace(0, 1, k, device=foot.ends.device)[:, None]
         self.local = foot.ends[:, 0:1] * (1 - w) + foot.ends[:, 1:2] * w  # (2 feet, k, 3) body frame
         self.scan = HeightScan(terrains).to(foot.ends.device)
+        self.k = edge_cells(self.scan, self.radius)
 
     def __call__(self, s: torch.Tensor, tile: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """s (n, 13 + 2 NJ) states, tile (n,) -> (penalty (n,), the deepest point's depth (n,), detached)."""
         n, nq = s.shape[0], self.fk.nq
         out = self.fk(s[..., :nq], s[..., nq:])
-        p, q = out["pos"][:, self.feet], out["quat"][:, self.feet]  # (n, 2, 3 / 4)
-        v, w = out["lin_vel"][:, self.feet], out["ang_vel"][:, self.feet]
+        f = self.feet
+        return self.from_feet(out["pos"][:, f], out["quat"][:, f], out["lin_vel"][:, f], out["ang_vel"][:, f], tile)
+
+    def from_feet(self, p, q, v, w, tile) -> tuple[torch.Tensor, torch.Tensor]:
+        """Foot body poses / velocities (n, 2, 3 / 4) -> as __call__ (imagination's compiled step passes its own FK)."""
+        n = p.shape[0]
         r = quat_apply(q[:, :, None].expand(-1, -1, self.local.shape[1], -1), self.local.expand(n, -1, -1, -1))  # (n, 2, k, 3)
         pts = (p[:, :, None] + r).reshape(n, -1, 3)
         vel = (v[:, :, None] + torch.linalg.cross(w[:, :, None].expand_as(r), r, dim=-1)).reshape(n, -1, 3)
-        pen = edge_penetration(self.scan, pts, tile, self.radius, self.step)
+        pen = edge_penetration(self.scan, pts, tile, self.radius, self.step, self.k)
         speed = torch.sqrt((vel**2).sum(-1) + 1e-12)
         return self.dt * self.weight * (pen * (speed + 1e-6)).sum(-1), pen.detach().amax(-1)

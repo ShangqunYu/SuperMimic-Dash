@@ -63,12 +63,13 @@ def imagine(
 ) -> ImagRollout:
     """policy_scan: a HeightScan on POLICY_GRID for a teacher policy (terrain at the end of its goal).
     goal_root_ori: the goal frames' root orientation relative to the imagined root (gradients flow through it).
-    edge: an EdgeTerm (generator/metrics.py), subtracted from each step's reward (reward_terms 'edge_vol', and
+    edge: an EdgeTerm (generator/metrics.py), subtracted from each step's reward inside step_fn (reward_terms 'edge_vol', and
     'edge_hit': the share of steps with a foot point inside a lip cylinder)."""
     device = start.state.device
     n = start.state.shape[0]
     q0 = lib.default_joint_pos
-    step_fn = step_fn or ImagStep(wm, q0)
+    step_fn = step_fn or ImagStep(wm, q0, edge=edge)
+    assert (step_fn.edge is None) == (edge is None), "the edge term is applied inside step_fn: build it with the same EdgeTerm"
     noise_half = obs_noise_half(wm.num_joints).to(device)
     anchor_noise_half = ANCHOR_NOISE_HALF.to(device)
     ai = wm.heads.anchor_index
@@ -128,14 +129,12 @@ def imagine(
     for t in range(horizon):
         obs_flat = flatten_history_term_major(torch.stack(hist, 0))
         a = policy(obs_flat, goals[-1])
-        s_next, r, term_vec, logits, obs_clean, anchor_pose = step_fn(s, a, a_prev, start.xi, ref)
+        s_next, r, term_vec, logits, obs_clean, anchor_pose, edge_out = step_fn(s, a, a_prev, start.xi, ref, tile)
         d = torch.sigmoid(logits)
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)
-        if edge is not None:
-            pen, deepest = edge(s_next, tile)
-            r = r - pen
-            edge_sum += torch.stack([pen.detach().mean(), (deepest > 0).float().mean()])
+        if edge_out is not None:  # r already has the edge penalty subtracted
+            edge_sum += torch.stack([edge_out[0].mean(), (edge_out[1] > 0).float().mean()])
 
         frame = frames_all[t + 1]
         ref = ref_at(t + 1)
