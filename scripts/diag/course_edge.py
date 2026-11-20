@@ -2,7 +2,8 @@
 riser to the top) and stairs-down zone (0.3 m before the first step down to 0.3 m past the bottom). Each argument
 is a run prefix whose seeds are <prefix>_s0, _s1, ... (course_demo out dirs). Same units as scripts/eval_edge.py:
 share of steps with a foot point inside a lip cylinder (5 cm + the foot capsule's radius), edge_vol per step (sum
-of depth x point speed), mean deepest depth. --key plan: the generator's plan instead of the robot.
+of depth x point speed), mean deepest depth, and how far the robot's feet are from the plan's (capsule centres,
+mean over both feet). --key plan: the generator's plan instead of the robot.
 
   python scripts/diag/course_edge.py logs/stairs_eval/course_edge_50k logs/stairs_eval/course_ctrl_50k [--key plan]
 """
@@ -44,6 +45,9 @@ for run in a.runs:
         speed = torch.zeros_like(pen)
         speed[:, 1:] = (pts[:, 1:] - pts[:, :-1]).norm(dim=-1) / 0.02
         vol = (pen * (speed + 1e-6)).sum(-1)
+        R = t["plan"].to(dev)
+        fp = fm.axis(R[..., :3], R[..., 3:7], R[..., 7:], 12).reshape(n, T, 2, 12, 3).mean(-2)
+        gap = (pts.reshape(n, T, 2, 12, 3).mean(-2) - fp).norm(dim=-1).mean(-1)  # (n, T)
         ground = scan.lookup(Q[..., 0].reshape(n, -1), Q[..., 1].reshape(n, -1), tiles).reshape(n, T)
         up = torch.cummin((Q[..., 2] - ground > 0.3).float(), 1).values.bool()
         for k, (v, sp, _) in enumerate(t["combo"]):
@@ -52,11 +56,12 @@ for run in a.runs:
             d0 = marks["platform"] - 0.3 + LANDING  # first step down
             x = Q[k, :, 0]
             for zone, m in (("up", up[k] & (x > START - 0.3) & (x < top)), ("down", up[k] & (x > d0 - 0.3) & (x < marks["stairs down"]))):
-                c = acc.setdefault((zone, t["speeds"][sp]), [0, 0.0, 0.0, 0.0])
+                c = acc.setdefault((zone, t["speeds"][sp]), [0, 0.0, 0.0, 0.0, 0.0])
                 c[0] += int(m.sum())
                 c[1] += float(((pen[k].amax(-1) > 0) & m).sum())
                 c[2] += float((vol[k] * m).sum())
                 c[3] += float((pen[k].amax(-1) * m).sum())
-    for (zone, sp), (cnt, hit, v_, dep) in sorted(acc.items()):
+                c[4] += float((gap[k] * m).sum())
+    for (zone, sp), (cnt, hit, v_, dep, fg) in sorted(acc.items()):
         print(f"{Path(run).name:20s} {a.key:5s} stairs {zone:4s} {sp} m/s: steps {cnt:6d}  hit {hit / max(cnt, 1):.3f}  edge_vol {v_ / max(cnt, 1):.4f}  "
-              f"depth {100 * dep / max(cnt, 1):.2f} cm", flush=True)
+              f"depth {100 * dep / max(cnt, 1):.2f} cm  feet from plan {100 * fg / max(cnt, 1):.1f} cm", flush=True)

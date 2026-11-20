@@ -30,7 +30,7 @@ from rollout_generator import DX, REPLAN, VEL_HALFLIFE, X0, Y0, command_path, fi
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env  # noqa: E402
 from supermimic.eval.benchmark import goal_env_kwargs, load_policy_from_checkpoint  # noqa: E402
 from supermimic.generator.data import GEN_GRID, GRID_SHAPE, from_canonical, to_canonical  # noqa: E402
-from supermimic.generator.guidance import FootClearance  # noqa: E402
+from supermimic.generator.guidance import EdgeClearance, FootClearance, select_plans  # noqa: E402
 from supermimic.generator.metrics import FootMetrics  # noqa: E402
 from supermimic.kinematics.rotations import heading_yaw, quat_inv, quat_mul, rotvec_from_quat  # noqa: E402
 from supermimic.terrain.height_scan import HeightScan  # noqa: E402
@@ -63,13 +63,16 @@ def with_velocities(cur: torch.Tensor, plan: torch.Tensor) -> torch.Tensor:
 
 
 def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: float, workdir: Path, dev: str, steps: int = 20, guidance: float = 1.0,
-             seed: int = 0, replan: int = REPLAN, halflife: float = VEL_HALFLIFE, dr: bool = False, delay: bool = False, foot_guide: dict | None = None):
+             seed: int = 0, replan: int = REPLAN, halflife: float = VEL_HALFLIFE, dr: bool = False, delay: bool = False, foot_guide: dict | None = None,
+             edge_guide: dict | None = None, edge_select: int = 1, edge_radius: float = 0.05):
     """Generator + teacher in physics. terr: list of Terrain; tiles (n,) each env's terrain; start (n, 25) its start
     pose; cmd_v (n, 3) its joystick command (operator heading hold to yaw 0 applies), or a schedule (n, T, 4) per
     step: vx, vy, wz, the heading held where wz is 0. replan: frames between plans; halflife: the command path's
     velocity spring (rollout_generator.command_path); dr: the teacher's training randomization (robot DR, hardware DR, observation
     noise; no action noise, as deployed); delay: actuator command delay (0-25 ms); foot_guide: FootClearance kwargs
-    (guided sampling keeping the plan's soles out of the terrain), None = off. -> robot frames Q (n, T, 25), the
+    (guided sampling keeping the plan's soles out of the terrain), None = off; edge_guide: EdgeClearance kwargs (the
+    same against the step lips); edge_select: sample this many plans per env and replan and keep the one with the
+    least lip contact (guidance.select_plans; 1 = off). -> robot frames Q (n, T, 25), the
     tracked plan frame R (n, T, 25), robot velocities V (n, T, 6 + NJ) [root lin vel w, root ang vel w, joint vel]."""
     n = len(tiles)
     T = int(seconds * 50)
@@ -97,7 +100,12 @@ def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: floa
     buf = robot_now()[:, None].repeat(1, max(H, REPLAN + 1), 1)
     scan = HeightScan(SimpleNamespace(terrains=terr), GEN_GRID).to(dev)
     nm = model.norm
+    assert foot_guide is None or edge_guide is None
     fc = FootClearance(nm, FootMetrics(scan, dev), **foot_guide) if foot_guide is not None else None
+    fc = EdgeClearance(nm, FootMetrics(scan, dev), radius=edge_radius, **edge_guide) if edge_guide is not None else fc
+    N = edge_select
+    fm_sel = FootMetrics(scan, dev) if N > 1 else None
+    sel_stats = []
     g = torch.Generator(device=dev).manual_seed(seed)
     Q, R, V = [], [], []
     with torch.no_grad():
@@ -111,9 +119,15 @@ def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: floa
                 s49[:, :7] = cur[:, :7]
                 hmap = (scan(s49, tiles) - origin[:, 2:3]).reshape(n, *GRID_SHAPE)
                 c = command_path(buf, operator(buf, cmd_v) if cmd_v.dim() == 2 else operator(buf, cmd_v[:, t, :3], cmd_v[:, t, 3]), halflife)
+                rep = (lambda v: v.repeat_interleave(N, 0)) if N > 1 else (lambda v: v)  # noqa: E731
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    x = diff.sample(model, nm.frames(hist), nm.hmap(hmap), nm.cmd(c), torch.ones(n, device=dev), steps=steps, guidance=guidance, generator=g,
-                                   x0_hook=fc.hook(origin, yaw0, tiles) if fc else None).float()
+                    x = diff.sample(model, rep(nm.frames(hist)), rep(nm.hmap(hmap)), rep(nm.cmd(c)), torch.ones(n * N, device=dev), steps=steps,
+                                   guidance=guidance, generator=g, x0_hook=fc.hook(rep(origin), rep(yaw0), rep(tiles)) if fc else None).float()
+                if N > 1:
+                    pos, quat, q = from_canonical(nm.frames_inv(x), rep(origin), rep(yaw0))
+                    pick, cost = select_plans(fm_sel, pos, quat, q, tiles, n, edge_radius)
+                    x = x.reshape(n, N, *x.shape[1:])[torch.arange(n, device=dev), pick]
+                    sel_stats.append((float(cost.mean()), float(cost[torch.arange(n, device=dev), pick].mean())))
                 pos, quat, q = from_canonical(nm.frames_inv(x), origin, yaw0)
                 frames = with_velocities(cur, torch.cat([pos, quat, q], -1))
                 idx = cmd.frame[:, None] + torch.arange(1, frames.shape[1] + 1, device=dev)
@@ -127,7 +141,10 @@ def run_loop(model, diff, teacher: str, terr, tiles, start, cmd_v, seconds: floa
     env.close()
     if fc and fc.stats:
         b, a = map(sum, zip(*fc.stats))
-        print(f"foot guidance: worst sole depth per plan {100 * b / len(fc.stats):.1f} -> {100 * a / len(fc.stats):.1f} cm (mean over plans)", flush=True)
+        print(f"{type(fc).__name__}: worst depth per plan {100 * b / len(fc.stats):.1f} -> {100 * a / len(fc.stats):.1f} cm (mean over plans)", flush=True)
+    if sel_stats:
+        b, a = map(sum, zip(*sel_stats))
+        print(f"best of {N}: lip contact per plan (sum of depths, m) {b / len(sel_stats):.3f} on average, {a / len(sel_stats):.3f} chosen", flush=True)
     for f in (lib, terrains_path(lib)):  # working files (~70 MB per 1000 envs)
         f.unlink(missing_ok=True)
     return torch.stack(Q, 1), torch.stack(R, 1), torch.stack(V, 1)

@@ -1200,6 +1200,30 @@ a later round (no labelled gap clips; PARC gap jumps would have to be found by s
   varies a lot (down 1.0 m/s p10 / p50 / p90: edge 0.18 / 0.48 / 0.60, ctrl 0.68 / 0.84 / 0.95): pick median runs
   for videos. Side by side, each tracker's median run (`scripts/media/course_sbs.py`, feet orange in the zone):
   `logs/stairs_eval/sbs/` (`render.sh`).
+- **The edge tracker's timeouts are a slower walk, not stalls alone**: 17 cm at 0.5 m/s with `--seconds 40`, 3
+  seeds x 16: edge 48/48 finish (median 23.5 s, p90 25.6, max 26.1), ctrl 47/48 (1 fall; 20.7 / 21.9 / 23.4).
+  Section speeds edge vs ctrl: flat start 0.49 / 0.49, stairs up 0.35 / 0.35, deck 0.42 / 0.54, stairs down
+  0.43 / 0.48 m/s. The 24 s limit at 0.5 m/s leaves 4 s of slack on the 9.8 m course.
+- **Edge-aware planning at sampling time does not move the feet** (2026-11-20; `generator/guidance.py`
+  `EdgeClearance` (x0_hook: gradient on the plan's foot-axis points out of the lip cylinders, horizontal only,
+  joints only, last 4 steps x 5) and `select_plans` (best of N samples by lip contact, among those travelling >= 0.9
+  x the median distance); `course_demo.py --edge-guide / --edge-select N`; `logs/stairs_eval/plan_guidance.sh`).
+  Stairs-only course, 0.5 / 1 m/s, 3 seeds, 144 runs per row; hit = share of steps with a foot in the zone:
+
+  | | success (falls, timeouts) | plan hit up / down | robot hit up / down | robot feet from plan |
+  |---|---|---|---|---|
+  | ctrl, plain | 140 (4, 0) | 0.38-0.47 / 0.68-0.79 | 0.29-0.34 / 0.81-0.84 | 4-8 cm |
+  | ctrl, best of 8 | 142 (1, 1) | 0.35-0.41 / 0.60-0.79 | 0.29-0.35 / 0.81-0.83 | 4-8 cm |
+  | ctrl, guided | 144 (0, 0) | **0.08-0.11 / 0.13-0.15** | 0.28-0.39 / 0.78-0.84 | **6-9 cm** |
+  | edge, plain | 134 (1, 9) | 0.25-0.40 / 0.44-0.47 | 0.03-0.07 / 0.30-0.42 | 4-8 cm |
+  | edge, best of 8 | 133 (1, 10) | 0.24-0.36 / 0.38-0.45 | 0.02-0.07 / 0.21-0.46 | 4-8 cm |
+  | edge, guided | 135 (0, 9) | 0.06-0.10 / 0.08-0.10 | 0.03-0.06 / 0.22-0.41 | 5-8 cm |
+
+  Guidance makes the plans nearly edge-free (worst depth per plan 1.3 -> 0.4 cm) but the control tracker puts its
+  feet on the lips anyway, further from the plan; best of 8 only lowers the plan's contact by a third (8 samples
+  differ little in their footholds) and changes nothing downstream. Where the feet land is the tracker's own habit
+  (as with the sole-clearance guidance above); edge avoidance has to be trained into the tracker, which the edge
+  run did. Wall time per run (48 envs x 24 s, shared GPUs): best of 8 ~3 min, guided ~4.3 min.
 
 ## PARC terrain data (2026-11-08, lab server)
 

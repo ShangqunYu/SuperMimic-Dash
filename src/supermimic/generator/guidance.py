@@ -1,5 +1,6 @@
 """Guided sampling for the motion generator (no retraining): a Diffusion.sample x0_hook that corrects each late
 denoising step's clean-plan estimate so the plan's soles stay out of the terrain.
+EdgeClearance / select_plans: the same against the step lips (the tracker's edge term), as a hook or best-of-N.
 
 On 17 / 18 cm stairs at 2 m/s gen_v6's plans put a sole > 3 cm into a step in 60 / 64 runs (10-11 cm at worst): the
 swing foot cuts through the stair edge and the tracking policy has to improvise there. The cost is the squared depth
@@ -15,7 +16,7 @@ from __future__ import annotations
 import torch
 
 from supermimic.generator.data import Normalizer, from_canonical
-from supermimic.generator.metrics import FootMetrics
+from supermimic.generator.metrics import FootMetrics, edge_penetration
 
 ROOT_FEATURES = 9  # position (3) + rot6d (6) ahead of the joints in a canonical frame
 
@@ -68,3 +69,42 @@ class FootClearance:
             return x.to(x0.dtype)
 
         return fix
+
+
+def plan_edge(fm: FootMetrics, pos, quat, q, tiles, radius: float = 0.05, horizontal: bool = True) -> torch.Tensor:
+    """Plan (B, F, ...) in the terrain frame -> (B, F, 2 x 12) depth of the foot capsules' axis points inside the step-lip
+    cylinders (metrics.edge_penetration, radius + the capsule's; the tracker's edge term without its speed weight).
+    horizontal: the depth is differentiable in x, y only, so a gradient slides a foot along the tread instead of
+    lifting it off."""
+    B, F = pos.shape[:2]
+    p = fm.axis(pos, quat, q, 12).reshape(B * F, -1, 3)
+    if horizontal:
+        p = torch.cat([p[..., :2], p[..., 2:].detach()], -1)
+    return edge_penetration(fm.scan, p, tiles.repeat_interleave(F), radius + fm.radius).reshape(B, F, -1)
+
+
+class EdgeClearance(FootClearance):
+    """x0_hook like FootClearance, against the step lips: gradient steps on the late clean-plan estimates against the
+    squared depth of the foot points inside the lip cylinders (plan_edge, horizontal). joints_only (default) keeps the
+    generator's root path and speed, so feet move relative to the body rather than the plan slowing down."""
+
+    def __init__(self, norm: Normalizer, fm: FootMetrics, last: int = 4, iters: int = 5, step: float = 20.0, radius: float = 0.05,
+                 joints_only: bool = True):
+        super().__init__(norm, fm, last=last, iters=iters, step=step, joints_only=joints_only)
+        self.radius = radius
+
+    def depth(self, x: torch.Tensor, origin, yaw0, tiles) -> torch.Tensor:
+        pos, quat, q = from_canonical(self.norm.frames_inv(x), origin, yaw0)
+        return plan_edge(self.fm, pos, quat, q, tiles, self.radius)
+
+
+def select_plans(fm: FootMetrics, pos, quat, q, tiles, n: int, radius: float = 0.05, keep: float = 0.9) -> tuple[torch.Tensor, torch.Tensor]:
+    """Best-of-N plans per env, all genuine generator samples: candidates (n * N, F, ...) env-major -> per env the index
+    (n,) of the candidate with the least lip contact (sum of plan_edge depth over frames and points) among those
+    whose root travels at least `keep` x the env's median candidate distance (a plan that stops has no lip contact
+    either), and (n, N) costs."""
+    N = pos.shape[0] // n
+    cost = plan_edge(fm, pos, quat, q, tiles.repeat_interleave(N), radius, horizontal=False).sum((1, 2)).reshape(n, N)
+    dist = (pos[:, -1, :2] - pos[:, 0, :2]).norm(dim=-1).reshape(n, N)
+    ok = dist >= keep * dist.median(1, keepdim=True).values
+    return torch.where(ok, cost, torch.full_like(cost, float("inf"))).argmin(1), cost

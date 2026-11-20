@@ -109,10 +109,14 @@ def run(a):
         R[..., 2] -= 50.0  # no plan: a ghost would sit far below the floor
     else:
         guide = {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last, "inflate": a.guide_inflate, "joints_only": not a.guide_root} if a.foot_guide else None
-        Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, seed=a.seed, dr=a.dr, delay=a.dr, foot_guide=guide)
+        eg = {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last, "joints_only": not a.guide_root} if a.edge_guide else None
+        Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, seed=a.seed, dr=a.dr, delay=a.dr, foot_guide=guide,
+                           edge_guide=eg, edge_select=a.edge_select, edge_radius=a.edge_radius)
     res = score(Q, tiles, terr, [b[1] for b in built], [b[2] for b in built], dev)
     meta = {"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "student": a.student, "dr": a.dr, "seed": a.seed,
-            "foot_guide": a.foot_guide and {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last, "inflate": a.guide_inflate, "root": a.guide_root}}
+            "foot_guide": a.foot_guide and {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last, "inflate": a.guide_inflate, "root": a.guide_root},
+            "edge_guide": a.edge_guide and {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last, "root": a.guide_root},
+            "edge_select": a.edge_select, "edge_radius": a.edge_radius}
     report(out, meta, names, a.speeds, combo, res)
     torch.save({"robot": Q.cpu(), "plan": R.cpu(), "variants": variants, "names": names, "speeds": a.speeds, "samples": S, "combo": combo, "results": res,
                 "marks": [b[1] for b in built], "finish": [b[2] for b in built], "dr": a.dr, "student": a.student}, out / "traj.pt")
@@ -284,6 +288,10 @@ def main():
     ap.add_argument("--dr", action="store_true", help="robot + hardware DR, observation noise, 0-25 ms actuator delay (student: and the depth "
                     "camera's noise, dropouts, latency and pose)")
     ap.add_argument("--foot-guide", action="store_true", help="guided sampling keeping the plan's soles out of the terrain (generator/guidance.py)")
+    ap.add_argument("--edge-guide", action="store_true", help="guided sampling sliding the plan's feet out of the step-lip cylinders "
+                    "(generator/guidance.py EdgeClearance; uses the --guide-* settings)")
+    ap.add_argument("--edge-select", type=int, default=1, help="best of N plans per replan by lip contact (guidance.select_plans)")
+    ap.add_argument("--edge-radius", type=float, default=0.05, help="m: lip cylinder radius (+ the foot capsule's) for --edge-guide / --edge-select")
     ap.add_argument("--guide-step", type=float, default=20.0)
     ap.add_argument("--guide-iters", type=int, default=5)
     ap.add_argument("--guide-last", type=int, default=4, help="guided (final) denoising steps")
