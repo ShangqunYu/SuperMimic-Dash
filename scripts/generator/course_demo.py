@@ -4,10 +4,12 @@ deck, a jump up onto a higher platform, stairs back down to the ground, then fla
 
   python scripts/generator/course_demo.py gen_ckpt teacher out [--speeds 1.5 2.0] [--samples 8] [--dr]
   python scripts/generator/course_demo.py --render out [--pick VARIANT SPEED SAMPLE] [--ghost] [--size 1920 1080]
+  python scripts/generator/course_demo.py --rescore out  (results.json and traj.pt's results from the current scoring)
 
 Variants: stair riser up x gap width x platform height (all combinations of --rises, --gaps, --platforms). Per run:
 the furthest feature passed while up (root > 0.3 m above the lowest ground within 0.3 m along x, tilt < 60 deg),
-success (whole course, never down, standing at the end) and the speed from x 0.5 m to the finish line. Results in
+success (reached the finish line without going down; the run-out after it does not count) and the speed from x 0.5 m
+to the finish line. Failures: the feature the robot went down before, or "timeout" (still up, short of the finish). Results in
 out/results.json, trajectories in out/traj.pt. --render: the fastest successful run per speed (or --pick) as a
 tracking-camera video, robot speed and the joystick overlaid; --ghost adds the generator's plan.
 """
@@ -79,7 +81,7 @@ def score(Q, tiles, terr, marks, finish, dev):
         passed = [f for f, m in marks[k].items() if reach > m]
         i0 = np.argmax(xs > 0.5) if (xs > 0.5).any() else None
         i1 = np.argmax(xs > finish[k]) if (xs > finish[k]).any() else None
-        ok = td == T and i1 is not None
+        ok = i1 is not None
         out.append({"success": ok, "passed": passed, "down_at_s": None if td == T else round(td / 50, 2), "reach_x": round(reach, 2),
                     "course_m_s": round((finish[k] - 0.5) / ((i1 - i0) * 0.02), 2) if i0 is not None and i1 is not None else None,
                     "finish_s": round(i1 / 50, 2) if i1 is not None else None})
@@ -109,9 +111,17 @@ def run(a):
         guide = {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last, "inflate": a.guide_inflate, "joints_only": not a.guide_root} if a.foot_guide else None
         Q, R, _ = run_loop(model, diff, a.teacher, terr, tiles, start, cmd_v, a.seconds, out, dev, seed=a.seed, dr=a.dr, delay=a.dr, foot_guide=guide)
     res = score(Q, tiles, terr, [b[1] for b in built], [b[2] for b in built], dev)
+    meta = {"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "student": a.student, "dr": a.dr, "seed": a.seed,
+            "foot_guide": a.foot_guide and {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last, "inflate": a.guide_inflate, "root": a.guide_root}}
+    report(out, meta, names, a.speeds, combo, res)
+    torch.save({"robot": Q.cpu(), "plan": R.cpu(), "variants": variants, "names": names, "speeds": a.speeds, "samples": S, "combo": combo, "results": res,
+                "marks": [b[1] for b in built], "finish": [b[2] for b in built], "dr": a.dr, "student": a.student}, out / "traj.pt")
+
+
+def report(out: Path, meta: dict, names, speeds, combo, res):
     table = {}
     for (v, s, k), r in zip(combo, res):
-        table.setdefault(names[v], {}).setdefault(f"{a.speeds[s]}", []).append(r)
+        table.setdefault(names[v], {}).setdefault(f"{speeds[s]}", []).append(r)
     summary = {}
     for nm, by in table.items():
         for sp, rs in by.items():
@@ -119,16 +129,22 @@ def run(a):
             fails = {}
             for r in rs:
                 if not r["success"]:
-                    nxt = next((f for f in ("stairs up", "gap", "platform", "stairs down") if f not in r["passed"]), "end")
+                    nxt = "timeout" if r["down_at_s"] is None else next((f for f in ("stairs up", "gap", "platform", "stairs down") if f not in r["passed"]), "end")
                     fails[nxt] = fails.get(nxt, 0) + 1
             summary.setdefault(nm, {})[sp] = {"success": f"{len(v)}/{len(rs)}", "course_m_s": round(float(np.mean(v)), 2) if v else None, "failed_at": fails}
             print(f"{nm} | joystick {sp} m/s: {len(v)}/{len(rs)} @ {summary[nm][sp]['course_m_s']} m/s, failed at {fails}", flush=True)
-    (out / "results.json").write_text(json.dumps({"gen_ckpt": a.gen_ckpt, "teacher": a.teacher, "student": a.student, "dr": a.dr, "seed": a.seed,
-                                                  "foot_guide": a.foot_guide and {"step": a.guide_step, "iters": a.guide_iters, "last": a.guide_last,
-                                                                                  "inflate": a.guide_inflate, "root": a.guide_root}, "summary": summary,
-                                                  "runs": table}, indent=1))
-    torch.save({"robot": Q.cpu(), "plan": R.cpu(), "variants": variants, "names": names, "speeds": a.speeds, "samples": S, "combo": combo, "results": res,
-                "marks": [b[1] for b in built], "finish": [b[2] for b in built], "dr": a.dr, "student": a.student}, out / "traj.pt")
+    (out / "results.json").write_text(json.dumps({**meta, "summary": summary, "runs": table}, indent=1))
+
+
+def rescore(out: Path, dev: str = "cuda:0"):
+    tr = torch.load(out / "traj.pt", weights_only=False)
+    built = [course(*v) for v in tr["variants"]]
+    tiles = torch.tensor([c[0] for c in tr["combo"]], device=dev)
+    res = score(tr["robot"].to(dev), tiles, [b[0] for b in built], [b[1] for b in built], [b[2] for b in built], dev)
+    meta = {k: v for k, v in json.loads((out / "results.json").read_text()).items() if k not in ("summary", "runs")}
+    report(out, meta, tr["names"], tr["speeds"], tr["combo"], res)
+    tr["results"] = res
+    torch.save(tr, out / "traj.pt")
 
 
 @torch.no_grad()
@@ -199,7 +215,8 @@ def render_runs(a):
             outcome = f"result: whole course at {res[i]['course_m_s']:.2f} m/s"
         else:
             where = next((mk for mk in ("stairs up", "gap", "platform", "stairs down") if mk not in res[i]["passed"]), "the end")
-            outcome = f"result: fell at the {where}" + (f" ({res[i]['down_at_s']:.1f} s)" if res[i]["down_at_s"] else "")
+            outcome = (f"result: fell at the {where} ({res[i]['down_at_s']:.1f} s)" if res[i]["down_at_s"] else
+                       f"result: still up at the time limit, {res[i]['reach_x']:.1f} m along the course")
         Q, Rp = resample(q50[:end], 50, 1.0), resample(tr["plan"][i].numpy().astype(np.float64)[:end], 50, 1.0)
         p = Q[:, :3]
         look = np.stack([gaussian_filter1d(p[:, 0], 0.4 * FPS, mode="nearest"), gaussian_filter1d(p[:, 1], 0.6 * FPS, mode="nearest"),
@@ -274,6 +291,7 @@ def main():
     ap.add_argument("--guide-root", action="store_true", help="the correction may move the root too (default: joints only)")
     ap.add_argument("--student", help="run this depth student alone instead of the generator + teacher (gen_ckpt still gives the start pose)")
     ap.add_argument("--render", action="store_true", help="render runs from out/traj.pt")
+    ap.add_argument("--rescore", action="store_true", help="re-score out/traj.pt (results.json and traj.pt rewritten)")
     ap.add_argument("--pick", type=int, nargs=3, metavar=("VARIANT", "SPEED", "SAMPLE"))
     ap.add_argument("--ghost", action="store_true")
     ap.add_argument("--size", type=int, nargs=2, default=[1920, 1080])
@@ -282,6 +300,8 @@ def main():
     a = ap.parse_args()
     if a.render:
         render_runs(a)
+    elif a.rescore:
+        rescore(Path(a.out))
     else:
         run(a)
 

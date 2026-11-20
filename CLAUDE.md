@@ -1146,6 +1146,60 @@ a later round (no labelled gap clips; PARC gap jumps would have to be found by s
   aug climbs every tracker lags the reference (v6: max root distance median 1.1 m on stairs up, 0.35 m down; mocap
   0.11 m): it climbs slower than its own recorded runs and never catches up on the flat top (global root term
   0.5 x exp(-d^2 / 0.3^2) gives nothing back once ~0.5 m behind). Failures there are falls after lagging.
+- **From-scratch runs** (`scripts/train_stairs.sh`): v6's flags on `dash_stairs_v1.pt`, 50k iterations (lr decay
+  from 10k), `logs/dash_stairs_edge` (`--policy-trainer.edge-vol 33`, GPU 1) and `logs/dash_stairs_ctrl` (GPU 0),
+  2.9-3.0 it/s each, ~4.7 h. `scripts/eval_stairs.sh` evaluates every 10k checkpoint and runs the course at 50k
+  (`logs/stairs_eval/`). Held-out pack, failed / mean return / edge hit / edge_vol, nominal (DR within 0-3 fails,
+  0.01-0.04 return):
+
+  | | mocap stairs (46) | aug stairs up (93) | aug stairs down (77) |
+  |---|---|---|---|
+  | ctrl 10k | 6 / 0.720 / 0.887 / 0.071 | 5 / 0.845 / 0.295 / 0.015 | 0 / 0.877 / 0.246 / 0.018 |
+  | edge 10k | 22 / 0.623 / 0.432 / 0.012 | 1 / 0.830 / 0.084 / 0.002 | 1 / 0.857 / 0.082 / 0.002 |
+  | edge 20k | 7 / 0.742 / 0.391 / 0.006 | 0 / 0.876 / 0.053 / 0.001 | 1 / 0.890 / 0.071 / 0.001 |
+  | ctrl 50k | 0 / 0.902 / 0.843 / 0.061 | 0 / 0.948 / 0.250 / 0.012 | 0 / 0.947 / 0.249 / 0.018 |
+  | **edge 50k** | 0 / 0.870 / **0.271 / 0.003** | 0 / 0.934 / **0.032 / 0.0002** | 0 / 0.928 / **0.050 / 0.0003** |
+
+  The edge run's mocap failures at 10-20k were transient (0-1 from 30k on). The 46 held-out mocap clips are only
+  two human stairs-down takes (`down_stop_R_001__A300`, `down_loop_R_102__A301`), mirrored and refitted to 12 US
+  stair sizes; no held-out human stairs up.
+- **The mocap references are clean apart from shallow step overlap** (`scripts/media/render_reference.py --stats`;
+  foot capsule vs the heightfield solid): frames with a foot > 1 cm into a step: mocap 11.9 % (train) / 9.5 %
+  (eval), worst per clip p50 1.6 cm, p90 2.6 cm; aug 0.2 %; PARC 0.0 %. Standing with > 30 % of the foot over a
+  lower step: mocap 0.1 % of stance frames, aug 4 %, PARC 6 %. Human feet sit near the nosing (edge zone) but on
+  the tread. Videos (two panels: body | feet profile, feet red / orange when overlapping / overhanging):
+  `render_reference.py out LIB --clips ... --evals "label=logs/stairs_eval/edge_10k.json"`.
+- **Course at 50k** (stairs-only `course_demo.py`: 5 steps up of 10 / 14 / 17 cm, 30 cm treads, 3 m flat deck,
+  steps of <= 15 cm down, `--gaps 0 --platforms 0 --seconds 24 --dr`, gen_v6 plans, 3 seeds x 8 = 24 per cell).
+  **Scoring changed** (2026-11-20, `course_demo.py --rescore` re-scores a traj.pt): success = reached the finish
+  line without going down (before: also still up at the end of `--seconds`; at 1.5-2 m/s x 24 s the robots ran
+  ~30 m and fell off the end of the world, scoring 0 successes); failures split into falls (by feature) and
+  "timeout" (still up, short of the finish). Earlier course numbers in this file used the old rule.
+
+  | success (falls, timeouts) of 24 | 0.5 m/s | 1.0 | 1.5 | 2.0 |
+  |---|---|---|---|---|
+  | ctrl 10 / 14 / 17 cm | 24 / 24 / 24 | 24 / 22 (2) / 22 (2) | 23 / 20 / 11 | 20 / 4 / 1 |
+  | edge 10 / 14 / 17 cm | 24 / 23 (0, 1) / **16 (0, 8)** | 24 / 23 (1) / 24 | 17 / 17 / 18 | 11 / 9 / 10 |
+
+  At 0.5-1 m/s (the stairs data's range is 0.3-1 m/s) 140 vs 134 of 144, edge falls 1 vs 4; at 1.5-2 m/s (outside
+  it) 79 vs 82. **Edge timeouts are generator stalls**: in 6 of the edge tracker's 72 runs at 0.5 m/s the plan
+  itself stops (robot and plan stand in a split stance for 2-6 s, mostly on the deck 0.4-1.7 m past the top; never
+  with the control). The generator replans from the robot's state, so the edge tracker's gait leads it into a
+  stop; not a tracking failure. Video: `logs/stairs_eval/course_edge_50k_s0/course_v2_0.5ms_0_ghost.mp4`.
+- **Edge contact on the course** (`scripts/diag/course_edge.py`, while up; hit / edge_vol per step):
+
+  | | up 0.5 m/s | up 1.0 | down 0.5 | down 1.0 | up 1.5-2.0 | down 1.5-2.0 |
+  |---|---|---|---|---|---|---|
+  | ctrl robot | 0.29 / 0.011 | 0.34 / 0.032 | 0.84 / 0.059 | 0.81 / 0.092 | 0.32-0.38 / 0.06 | 0.74-0.78 / 0.11 |
+  | **edge robot** | **0.03 / 0.001** | **0.07 / 0.003** | **0.30 / 0.001** | **0.42 / 0.009** | 0.17-0.20 / 0.02-0.03 | 0.56-0.61 / 0.04-0.06 |
+  | plan (ctrl runs) | 0.38 / 0.030 | 0.47 / 0.078 | 0.79 / 0.069 | 0.68 / 0.074 | | |
+  | plan (edge runs) | 0.25 / 0.017 | 0.40 / 0.044 | 0.44 / 0.014 | 0.47 / 0.032 | | |
+
+  The generator plans footholds on the lips (it learned them from the mocap) and the edge tracker overrides them;
+  its plans' contact is lower only because the plan restarts from the robot's state. Per run (17 cm), edge hit
+  varies a lot (down 1.0 m/s p10 / p50 / p90: edge 0.18 / 0.48 / 0.60, ctrl 0.68 / 0.84 / 0.95): pick median runs
+  for videos. Side by side, each tracker's median run (`scripts/media/course_sbs.py`, feet orange in the zone):
+  `logs/stairs_eval/sbs/` (`render.sh`).
 
 ## PARC terrain data (2026-11-08, lab server)
 
