@@ -1224,6 +1224,18 @@ a later round (no labelled gap clips; PARC gap jumps would have to be found by s
   differ little in their footholds) and changes nothing downstream. Where the feet land is the tracker's own habit
   (as with the sole-clearance guidance above); edge avoidance has to be trained into the tracker, which the edge
   run did. Wall time per run (48 envs x 24 s, shared GPUs): best of 8 ~3 min, guided ~4.3 min.
+- **The edge detector matches exact geometry** (2026-11-20, `scripts/media/render_edge_check.py`; reference: lips
+  from the physics boxes' top edges where the surface outside is > 3 cm lower, depth from the exact distance between
+  the foot capsule's axis segment and the lip segments). Heightfield lips and box lips coincide to 0.0 mm on the
+  course and on every checked library terrain, except at the heightfield grid's outer border, where the boxes drop
+  to the floor while clamped lookups extend the border cells (no lip for the detector; 170 of 216 eval terrains,
+  >= 1.4 m from any reference root). Per-foot depth, detector vs exact: course runs (6 run dirs, ~1.0M foot-frames)
+  mean |diff| <= 0.002 cm, max 0.68 cm, in/out disagreement <= 0.008 %; eval pack reference motion (216 clips) mean
+  0.003 cm, max 0.63 cm, 0.009 %; first 800 clips of `dash_stairs_v1.pt` (mocap, PARC, aug) 0.003 / 0.61 cm /
+  0.010 %. Every difference is the 12-point sampling of the capsule axis (1.43 cm apart): the detector reads up to
+  0.7 cm shallow when the axis passes within millimetres of a lip (exact depth ~6 cm), always lower, never at lip
+  ends. Videos `logs/stairs_eval/edge_check/` (`render_videos.sh`; numeric checks `render.sh`): orthographic side
+  view along the lips (each zone a circle round its corner), 3/4 view, depth plot detector vs exact.
 
 ## PARC terrain data (2026-11-08, lab server)
 
